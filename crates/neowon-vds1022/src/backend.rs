@@ -96,6 +96,10 @@ impl Backend for Vds1022Backend {
         }
         if !same(part_rate) {
             self.dev.set_sample_rate(cfg.sample_rate).map_err(fatal)?;
+            let want_roll = cfg.roll || (self.dev.sample_rate() < consts::ROLLMODE_THRESHOLD);
+            if self.dev.roll() != want_roll {
+                self.dev.set_roll(want_roll).map_err(fatal)?;
+            }
             self.dev.set_trigger_position(cfg.position).map_err(fatal)?;
         } else if !same(part_position) {
             self.dev.set_trigger_position(cfg.position).map_err(fatal)?;
@@ -323,7 +327,7 @@ fn part_channels(c: &ScopeConfig) -> ScopeConfigPart {
 }
 
 fn part_rate(c: &ScopeConfig) -> ScopeConfigPart {
-    vec![c.sample_rate.to_bits()]
+    vec![c.sample_rate.to_bits(), c.roll as u64]
 }
 
 fn part_position(c: &ScopeConfig) -> ScopeConfigPart {

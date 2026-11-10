@@ -1,6 +1,7 @@
 //! SDS2000X Plus screen anatomy (docs/ui-ux-research.md §1); one module per region.
 
 pub mod bandmap_window;
+pub mod automotive_dock;
 pub mod catalog_window;
 pub mod dab_dock;
 pub mod descriptors;
@@ -61,6 +62,7 @@ type VizState<'w> = (
     ResMut<'w, settings::Settings>,
     Res<'w, crate::sdr::SdrState>,
     Res<'w, crate::refmap::RefMap>,
+    ResMut<'w, automotive_dock::AutomotiveUiState>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -110,15 +112,28 @@ pub fn panel(
         viz: &mut viz.1,
         sdr: &viz.9,
         refmap: &viz.10,
+        auto: &mut viz.11,
+        rec: &rec,
+        hist: &mut hist,
     };
     let r = menubar::show(&ctx, &layout, &mut link, now, &viz.6, &mut bar);
     rects.put("menu_bar", r);
     // In SDR mode the SDR view and dock take the descriptor bar's and the
     // dock's places (drawn underneath windows, so Settings stays reachable).
-    let sdr_mode = viz.9.active;
+    let sdr_mode = false; // SDR deshabilitado para PicoWon Automotive
     if !sdr_mode {
         let (desc, overlay) =
-            descriptors::show(&ctx, &layout, &mut link, &phosphor, &mut meas, &mut menus);
+            descriptors::show(
+                &ctx,
+                &layout,
+                &mut link,
+                &phosphor,
+                &mut meas,
+                &mut menus,
+                &rec,
+                &mut hist,
+                &mut viz.11,
+            );
         rects.put("descriptors", desc);
         rects.put("meas_overlay", overlay);
     }
@@ -133,6 +148,7 @@ pub fn panel(
             &mut math,
             &mut meas,
             &mut menus,
+            &mut viz.11,
         )
     };
     rects.put("front_panel", r);
@@ -158,13 +174,43 @@ pub fn panel(
             &mut viz.5,
             &mut viz.6,
             &mut viz.7,
+            &mut viz.11,
         );
         rects.put("dialog", r);
     }
     settings::window(&ctx, &mut viz.8, &mut rec, &viz.4, &mut script);
+    // Modo osciloscopio: desactiva deep/timeline para que la senal llene la pantalla con trigger y zoom de hardware
+    if viz.6.on {
+        crate::deep::set_on(&mut viz.6, &mut phosphor, false);
+        phosphor.deep = None;
+    }
+
+    // Detección tecla F1 para ayuda
+    if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+        viz.11.help_window_open = !viz.11.help_window_open;
+    }
+    // Overlays Automotrices y Vistas Especializadas de la Suite
+    if viz.11.app_mode == automotive_dock::AppMode::ViCurveTracer {
+        // Modo Trazador VI: opera de forma completamente aislada de los demás módulos
+        automotive_dock::show_vi_tracer_view(&ctx, &layout, &mut link, &mut viz.11);
+    } else {
+        automotive_dock::show_zoom_window(&ctx, &layout, &link, &mut phosphor, &mut viz.11);
+        automotive_dock::draw_crank_overlay(&ctx, &layout, &link, &mut viz.11);
+        automotive_dock::show_strip_chart_view(&ctx, &layout, &mut link, &mut viz.11, &meas, now);
+        automotive_dock::show_actuator_analysis_view(&ctx, &layout, &link, &mut viz.11, now);
+        automotive_dock::show_bus_traffic_view(&ctx, &layout, &mut viz.11, &viz.7);
+        automotive_dock::show_can_diff_hud(&ctx, &layout, &mut link, &mut math, &mut viz.11);
+    }
+    automotive_dock::show_help_window(&ctx, &mut viz.11);
+    automotive_dock::show_scope_capture_dialog(&ctx, &mut link, &mut rec, &mut script, &mut viz.11);
+    automotive_dock::show_datalogger_session_dialogs(&ctx, &mut link, &mut viz.11, now);
+    automotive_dock::show_vi_capture_and_db_dialogs(&ctx, &mut link, &mut viz.11);
+    automotive_dock::show_capture_browser_dialog(&ctx, &mut link, &mut rec, &mut viz.11, now);
+    automotive_dock::show_active_capture_banner(&ctx, &layout, &mut link, &mut viz.11);
     crate::refs::overlay(&ctx, &layout, &refs);
 
     measure_window::show(&ctx, &mut meas);
+    dialog_decode::show_decode_table(&ctx, &mut viz.7);
     if fft.enabled {
         spectrum_window(&ctx, &mut fft);
     }
@@ -192,6 +238,7 @@ pub fn panel(
 /// double-click = reset.
 fn spectrum_window(ctx: &egui::Context, fft: &mut FftState) {
     egui::Window::new("Spectrum")
+        .open(&mut fft.enabled)
         .default_width(680.0)
         .show(ctx, |ui| {
             let (resp, painter) = ui.allocate_painter(

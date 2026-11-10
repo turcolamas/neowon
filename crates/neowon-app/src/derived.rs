@@ -12,7 +12,13 @@ use crate::Link;
 pub const SLOTS: usize = 3;
 pub const SLOT_NAMES: [&str; SLOTS] = ["CH1", "CH2", "M"];
 
-pub const N_METRICS: usize = 18;
+pub const N_METRICS: usize = 20;
+pub const N_BICHANNEL: usize = 3;
+pub const BICHANNEL_NAMES: [&str; N_BICHANNEL] = [
+    "RiseDelay 1->2",
+    "FallDelay 1->2",
+    "Phase 1->2",
+];
 
 /// Per-sample pass/fail envelope, in raw counts.
 #[derive(Debug, Clone)]
@@ -105,7 +111,7 @@ impl Default for MathState {
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct MeasureState {
     pub last_seq: u64,
     pub latest: [Option<Measurements>; SLOTS],
@@ -125,10 +131,53 @@ pub struct MeasureState {
     pub show_stats: bool,
     /// Which slots the table shows.
     pub show_slot: [bool; SLOTS],
+    /// Which individual metrics are active / visible in the table.
+    pub show_metric: [bool; N_METRICS],
     /// Draw measurement guide lines on the plot while the Measure dialog is
     /// open.
     pub guides: bool,
     pub sample_rate: f64,
+    /// Bichannel measurements between CH1 and CH2
+    pub bichannel: Option<neowon_dsp::BichannelMeasurements>,
+    pub bichannel_stats: [StatTrack; N_BICHANNEL],
+    pub bichannel_history: [std::collections::VecDeque<f64>; N_BICHANNEL],
+    pub bichannel_bands: [Band; N_BICHANNEL],
+    pub show_bichannel: [bool; N_BICHANNEL],
+    pub config_dialog_open: bool,
+}
+
+impl Default for MeasureState {
+    fn default() -> Self {
+        let mut show_metric = [false; N_METRICS];
+        show_metric[0] = true; // Period
+        show_metric[1] = true; // Frequency
+        show_metric[6] = true; // +DutyCycle
+        show_metric[8] = true; // Vpp
+        show_metric[9] = true; // Vmax
+        show_metric[10] = true; // Vmin
+        show_metric[17] = true; // Vrms
+
+        Self {
+            last_seq: 0,
+            latest: [None; SLOTS],
+            stats: Vec::new(),
+            bands: Vec::new(),
+            stats_slot: 0,
+            history: Vec::new(),
+            window: false,
+            show_stats: true,
+            show_slot: [true; SLOTS],
+            show_metric,
+            guides: false,
+            sample_rate: 0.0,
+            bichannel: None,
+            bichannel_stats: [StatTrack::default(); N_BICHANNEL],
+            bichannel_history: std::array::from_fn(|_| Default::default()),
+            bichannel_bands: [Band::default(); N_BICHANNEL],
+            show_bichannel: [false; N_BICHANNEL],
+            config_dialog_open: false,
+        }
+    }
 }
 
 /// Values kept per metric for the trend sparkline.
@@ -151,6 +200,16 @@ impl MeasureState {
         }
     }
 
+    pub fn push_bichannel_history(&mut self, i: usize, val: f64) {
+        if i < N_BICHANNEL {
+            let ring = &mut self.bichannel_history[i];
+            if ring.len() >= HISTORY_LEN {
+                ring.pop_front();
+            }
+            ring.push_back(val);
+        }
+    }
+
     pub fn reset_stats(&mut self) {
         for h in &mut self.history {
             for r in h.iter_mut() {
@@ -161,6 +220,12 @@ impl MeasureState {
             for t in s.iter_mut() {
                 t.reset();
             }
+        }
+        for r in &mut self.bichannel_history {
+            r.clear();
+        }
+        for t in &mut self.bichannel_stats {
+            t.reset();
         }
     }
 }
@@ -199,30 +264,42 @@ pub enum Unit {
     Second,
     Hertz,
     Percent,
+    VoltPerMicrosecond,
+    Degree,
 }
 
 /// One auto-measurement row: label, accessor, display unit.
 pub type Metric = (&'static str, fn(&Measurements) -> Option<f64>, Unit);
 
 pub const METRICS: [Metric; N_METRICS] = [
-    ("Freq", |m| m.freq, Unit::Hertz),
     ("Period", |m| m.period, Unit::Second),
+    ("Frequency", |m| m.freq, Unit::Hertz),
+    ("RiseTime", |m| m.rise, Unit::Second),
+    ("FallTime", |m| m.fall, Unit::Second),
+    ("+PulseWidth", |m| m.pwidth, Unit::Second),
+    ("-PulseWidth", |m| m.nwidth, Unit::Second),
+    ("+DutyCycle", |m| m.pduty, Unit::Percent),
+    ("-DutyCycle", |m| m.nduty, Unit::Percent),
     ("Vpp", |m| Some(m.vpp), Unit::Volt),
     ("Vmax", |m| Some(m.vmax), Unit::Volt),
     ("Vmin", |m| Some(m.vmin), Unit::Volt),
+    ("Vamp", |m| Some(m.vamp), Unit::Volt),
     ("Vtop", |m| Some(m.vtop), Unit::Volt),
     ("Vbase", |m| Some(m.vbase), Unit::Volt),
-    ("Vamp", |m| Some(m.vamp), Unit::Volt),
-    ("Vavg", |m| Some(m.vavg), Unit::Volt),
-    ("Vrms", |m| m.vrms, Unit::Volt),
-    ("Rise", |m| m.rise, Unit::Second),
-    ("Fall", |m| m.fall, Unit::Second),
-    ("+Width", |m| m.pwidth, Unit::Second),
-    ("-Width", |m| m.nwidth, Unit::Second),
-    ("+Duty", |m| m.pduty, Unit::Percent),
-    ("-Duty", |m| m.nduty, Unit::Percent),
     ("Overshoot", |m| m.overshoot, Unit::Percent),
     ("Preshoot", |m| m.preshoot, Unit::Percent),
+    ("Vavg", |m| Some(m.vavg), Unit::Volt),
+    ("Vrms", |m| m.vrms, Unit::Volt),
+    ("Cycle Vrms", |m| m.cycle_vrms, Unit::Volt),
+    ("SlewRate", |m| m.slew_rate, Unit::VoltPerMicrosecond),
+];
+
+pub type BichannelMetric = (&'static str, fn(&neowon_dsp::BichannelMeasurements) -> Option<f64>, Unit);
+
+pub const BICHANNEL_METRICS: [BichannelMetric; N_BICHANNEL] = [
+    ("RiseDelay 1->2", |b| b.rise_delay, Unit::Second),
+    ("FallDelay 1->2", |b| b.fall_delay, Unit::Second),
+    ("Phase 1->2", |b| b.phase_deg, Unit::Degree),
 ];
 
 pub fn compute_derived(
@@ -292,6 +369,30 @@ pub fn compute_derived(
                 }
             }
         }
+    }
+
+    // Cross-channel measurements (RiseDelay 1->2, FallDelay 1->2, Phase)
+    if let (Some(c1), Some(c2)) = (slot_caps[0], slot_caps[1]) {
+        if !envelope {
+            let bi = neowon_dsp::bichannel_measure(c1, c2, frame.sample_rate);
+            meas.bichannel = bi;
+            if let Some(b) = bi {
+                if let Some(v) = b.rise_delay {
+                    meas.bichannel_stats[0].update(v);
+                    meas.push_bichannel_history(0, v);
+                }
+                if let Some(v) = b.fall_delay {
+                    meas.bichannel_stats[1].update(v);
+                    meas.push_bichannel_history(1, v);
+                }
+                if let Some(v) = b.phase_deg {
+                    meas.bichannel_stats[2].update(v);
+                    meas.push_bichannel_history(2, v);
+                }
+            }
+        }
+    } else {
+        meas.bichannel = None;
     }
 
     fft.spectrum = if fft.enabled {
@@ -416,6 +517,8 @@ pub fn fmt_sticky(v: f64, unit: Unit, band: &mut Band) -> String {
         Unit::Volt => fmt_si_sticky(v, "V", band),
         Unit::Second => fmt_si_sticky(v, "s", band),
         Unit::Hertz => fmt_si_sticky(v, "Hz", band),
+        Unit::VoltPerMicrosecond => format!("{:>6.2} V/µs", v),
+        Unit::Degree => format!("{:>6.1} °", v),
     }
 }
 
@@ -426,6 +529,8 @@ pub fn fmt_width(unit: Unit) -> usize {
         Unit::Percent => 8,             // "  50.0 %"
         Unit::Volt | Unit::Second => 9, // " 200.0 mV"
         Unit::Hertz => 10,              // " 1.000 kHz"
+        Unit::VoltPerMicrosecond => 11, // "  5.00 V/µs"
+        Unit::Degree => 8,              // "  90.0 °"
     }
 }
 

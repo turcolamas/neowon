@@ -85,23 +85,76 @@ pub(crate) fn update_phosphor(
     time: Res<Time>,
     link: Res<Link>,
     math: Res<derived::MathState>,
+    auto: Option<Res<crate::ui::automotive_dock::AutomotiveUiState>>,
     mut phosphor: ResMut<Phosphor>,
     mut last_record_at: Local<f64>,
+    mut last_dsp: Local<[picowon_auto::ChannelDspConfig; 2]>,
 ) {
-    if let Some(frame) = &link.latest
-        && phosphor.frame.as_ref().map(|f| f.seq) != Some(frame.seq)
-    {
-        // Append the math trace (slot 2) when present.
-        phosphor.frame = Some(match &math.trace {
-            Some(m) => {
-                let mut f = (**frame).clone();
-                f.channels.push(m.clone());
-                std::sync::Arc::new(f)
-            }
-            None => frame.clone(),
-        });
-        phosphor.new_frame = true;
+    // En modo Trazador VI, suspender el procesamiento de phosphor y DSP para maximizar el framerate y rendimiento de captura
+    if let Some(a) = auto.as_ref() {
+        if a.app_mode == crate::ui::automotive_dock::AppMode::ViCurveTracer {
+            return;
+        }
     }
+
+    let current_dsp = auto.as_ref().map(|a| a.dsp).unwrap_or_default();
+    let dsp_changed = *last_dsp != current_dsp;
+    if dsp_changed {
+        *last_dsp = current_dsp;
+    }
+
+    if let Some(frame) = &link.latest {
+        let new_seq = phosphor.frame.as_ref().map(|f| f.seq) != Some(frame.seq);
+        if new_seq || dsp_changed {
+            let mut f = (**frame).clone();
+            let dsp_active = current_dsp.iter().any(|d| {
+                d.lpf_enabled
+                    || d.res_enhance_bits > 0.0
+                    || d.invert
+                    || d.tare_offset_v.abs() > 1e-6
+            });
+            if dsp_active {
+                for cap in f.channels.iter_mut() {
+                    if cap.ch < 2 {
+                        let cfg = &current_dsp[cap.ch];
+                        cap.data = picowon_auto::apply_channel_dsp(
+                            &cap.data,
+                            f.sample_rate,
+                            cap.cal.scale_i,
+                            cfg,
+                        );
+                    }
+                }
+            }
+            if let Some(m) = &math.trace {
+                f.channels.push(m.clone());
+            }
+            phosphor.frame = Some(std::sync::Arc::new(f));
+            phosphor.new_frame = true;
+        }
+    }
+    // Calcular delta de offset software (fundamental para mover la waveform en modo STOP o congelado)
+
+    for ch in 0..2 {
+
+        let captured_offset = phosphor.frame.as_ref().and_then(|f| {
+
+            f.channels.iter().find(|c| c.ch == ch).map(|c| {
+
+                let range = link.config.channels[ch].volts_div * 10.0 * link.config.channels[ch].probe;
+
+                if range > 0.0 { -c.cal.offset_i / range } else { 0.0 }
+
+            })
+
+        }).unwrap_or(link.config.channels[ch].offset);
+
+        phosphor.delta_offsets[ch] = (link.config.channels[ch].offset - captured_offset) as f32;
+
+    }
+
+
+
     // Persistence fades one record into the next, so it must advance once
     // per record — not once per rendered frame. Decaying in wall time meant
     // that at slow time bases, where a record can take a second to arrive,

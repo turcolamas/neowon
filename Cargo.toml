@@ -14,6 +14,7 @@ members = [
     "crates/neowon-cli",
     "crates/neowon-app",
     "crates/neowon-mcp",
+    "crates/picowon-auto",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+picowon-auto = { path = "crates/picowon-auto" }
 neowon-core = { path = "crates/neowon-core" }
 neowon-backend = { path = "crates/neowon-backend" }
 neowon-dsp = { path = "crates/neowon-dsp" }

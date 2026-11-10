@@ -55,6 +55,10 @@ impl Supervisor {
         let _ = self.commands.send(Command::Apply(cfg.into()));
     }
 
+    pub fn force_trigger(&self) {
+        let _ = self.commands.send(Command::ForceTrigger);
+    }
+
     /// Stop the acquisition thread and wait for it, so the backend has
     /// released its device before this returns. Idempotent (drop calls it).
     pub fn shutdown(&mut self) {

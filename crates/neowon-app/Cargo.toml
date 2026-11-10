@@ -9,6 +9,7 @@ name = "neowon-app"
 path = "src/main.rs"
 
 [dependencies]
+picowon-auto.workspace = true
 neowon-core.workspace = true
 neowon-codec.workspace = true
 neowon-dsp.workspace = true
@@ -24,6 +25,8 @@ bevy_egui.workspace = true
 bytemuck = "1"
 crossbeam-channel.workspace = true
 png.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 
 # D31: a `NEOWON_NO_INPUT` app hands activation back (src/hostinput/macos.rs).

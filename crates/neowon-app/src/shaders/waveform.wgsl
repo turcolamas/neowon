@@ -24,7 +24,8 @@ struct Params {
     view_start: f32,
     view_span: f32,
     deep: u32,
-    _pad: u32,
+    off0: f32,
+    off1: f32,
     col0: vec4f,
     col1: vec4f,
     col2: vec4f,
@@ -56,7 +57,13 @@ fn decay(@builtin(global_invocation_id) id: vec3<u32>) {
 // plot edge, like a real scope overdriving the graticule.
 fn sample_row(ch: u32, i: u32) -> f32 {
     let raw = wave[ch * params.samples + i];
-    let frac = clamp(0.5 - raw / 200.0, 0.0, 1.0);
+    var delta_off = 0.0;
+    if (ch == 0u) {
+        delta_off = params.off0;
+    } else if (ch == 1u) {
+        delta_off = params.off1;
+    }
+    let frac = clamp(0.5 - (raw / 250.0 + delta_off), 0.0, 1.0);
     return frac * f32(params.height - 1u);
 }
 
@@ -68,7 +75,7 @@ fn enabled_for(ch: u32) -> u32 {
 
 // The visible window is +-100 counts; beyond it the beam is off the plot.
 fn off_screen(raw: f32) -> bool {
-    return raw > 100.0 || raw < -100.0;
+    return raw > 125.0 || raw < -125.0;
 }
 
 // No acquired data in this column (see neowon_dsp::timeline::NO_DATA).
@@ -114,8 +121,8 @@ fn raster(@builtin(global_invocation_id) id: vec3<u32>) {
         let out1 = off_screen(wave[i]) || off_screen(wave[params.samples + i]);
         if (out0 && out1) { return; }
         // Same +-4-division window as the vertical axis.
-        let fx0 = clamp(0.5 + wave[i - 1u] / 200.0, 0.0, 1.0);
-        let fx1 = clamp(0.5 + wave[i] / 200.0, 0.0, 1.0);
+        let fx0 = clamp(0.5 + wave[i - 1u] / 250.0, 0.0, 1.0);
+        let fx1 = clamp(0.5 + wave[i] / 250.0, 0.0, 1.0);
         let x0 = f32(u32(fx0 * f32(params.width - 1u)));
         let x1 = f32(u32(fx1 * f32(params.width - 1u)));
         let y0 = sample_row(1u, i - 1u);
@@ -150,7 +157,7 @@ fn raster(@builtin(global_invocation_id) id: vec3<u32>) {
     // (Testing both would draw a spike to the plot edge at every gap edge,
     // because sample_row clamps rather than culling.)
     if (is_no_data(r0) || is_no_data(r1)) { return; }
-    if ((r0 > 100.0 && r1 > 100.0) || (r0 < -100.0 && r1 < -100.0)) { return; }
+    if ((r0 > 125.0 && r1 > 125.0) || (r0 < -125.0 && r1 < -125.0)) { return; }
 
     // Zoom window: cull samples outside; segments crossing the edge clamp
     // to the boundary column.
@@ -208,7 +215,7 @@ fn compose(@builtin(global_invocation_id) id: vec3<u32>) {
         a += (amp3(x - 1, y) + amp3(x + 1, y) + amp3(x, y - 1) + amp3(x, y + 1)) * 0.22
             + (amp3(x - 2, y) + amp3(x + 2, y) + amp3(x, y - 2) + amp3(x, y + 2)) * 0.08;
     }
-    var rgb = vec3f(0.008, 0.010, 0.014);
+    var rgb = vec3f(0.0, 0.0, 0.0);
     if (params.palette == 1u) {
         // Thermal DPO grading: combined dwell intensity -> heat colormap.
         let t = 1.0 - exp(-(a.x + a.y + a.z) * params.gain);

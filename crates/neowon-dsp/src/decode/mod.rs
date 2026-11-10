@@ -15,8 +15,10 @@
 //! returns an error saying so rather than emitting plausible bytes. A
 //! decoder that quietly produces wrong data is worse than one that declines.
 
+pub mod can;
 pub mod digitize;
 pub mod i2c;
+pub mod lin;
 pub mod onewire;
 pub mod spi;
 pub mod uart;

@@ -56,6 +56,11 @@ impl Link {
             last_shot: None,
         }
     }
+
+    /// Dispara inmediatamente una captura forzada por hardware (SET_FORCETRG)
+    pub fn force_trigger(&self) {
+        self.sup.force_trigger();
+    }
 }
 
 pub(crate) fn ingest(time: Res<Time>, mut link: ResMut<Link>, mut sdr: ResMut<sdr::SdrState>) {
@@ -92,7 +97,10 @@ pub(crate) fn ingest(time: Res<Time>, mut link: ResMut<Link>, mut sdr: ResMut<sd
                 if link.frames_seen == 1 || link.frames_seen.is_multiple_of(500) {
                     tracing::info!(frames = link.frames_seen, "acquiring");
                 }
-                link.latest = Some(f);
+                // Si la adquisición está detenida (revisando captura histórica o en pausa), no pisar link.latest
+                if link.config.running {
+                    link.latest = Some(f);
+                }
             }
             Event::ConfigUpdated(InstrumentConfig::Scope(cfg)) => {
                 link.config = cfg;

@@ -252,12 +252,16 @@ pub fn hview_home(p: &mut Phosphor) {
 }
 
 /// The configuration the app boots with — also what `home` restores the
-/// view geometry to. Defaults matched to the 1 kHz probe-comp signal
-/// through a x10 probe.
+/// view geometry to.
+/// SEGURIDAD FRONT-END: El osciloscopio SIEMPRE inicia el hardware en la escala máxima de voltaje (5.0 V/div)
+/// para proteger los relés de atenuación, divisores de entrada y amplificadores contra sobretensiones accidentales.
 pub fn startup_config() -> ScopeConfig {
     let mut config = ScopeConfig::default();
-    config.channels[0].volts_div = 0.2;
-    config.trigger.level = 0.25;
+    config.channels[0].volts_div = 5.0; // Máxima escala de seguridad de entrada
+    config.channels[1].volts_div = 5.0; // Máxima escala de seguridad de entrada
+    config.channels[0].enabled = true;
+    config.channels[1].enabled = false;
+    config.trigger.level = 0.5;
     config
 }
 
@@ -280,10 +284,48 @@ pub fn step_ladder(ladder: &[f64], current: f64, up: bool) -> f64 {
     ladder[idx]
 }
 
-fn vdiv_ladder(link: &Link) -> Vec<f64> {
+pub fn vdiv_ladder(link: &Link) -> Vec<f64> {
     link.scope_caps()
         .map(|c| c.volts_div.clone())
         .unwrap_or_else(|| FALLBACK_VDIV.to_vec())
+}
+
+/// Conmuta cíclicamente la atenuación de sonda (x1 -> x10 -> x100 -> x1)
+/// y recalcula la sensibilidad volts_div del hardware para que los atenuadores,
+/// amplificadores PGA y relés del osciloscopio conmuten inmediatamente.
+pub fn cycle_channel_probe(link: &mut Link, ch: usize) {
+    let current_probe = link.config.channels[ch].probe;
+    let next_probe = if current_probe < 5.0 {
+        10.0
+    } else if current_probe < 50.0 {
+        100.0
+    } else {
+        1.0
+    };
+    set_channel_probe(link, ch, next_probe);
+}
+
+/// Establece la atenuación de sonda y ajusta volts_div en el hardware
+pub fn set_channel_probe(link: &mut Link, ch: usize, new_probe: f64) {
+    let old_probe = link.config.channels[ch].probe.max(1.0);
+    let current_disp = link.config.channels[ch].volts_div * old_probe;
+    let target_hw = current_disp / new_probe.max(1.0);
+
+    let ladder = vdiv_ladder(link);
+    let min_hw = *ladder.first().unwrap_or(&0.005);
+    let max_hw = *ladder.last().unwrap_or(&5.0);
+    let clamped_hw = target_hw.clamp(min_hw, max_hw);
+
+    // Ajustar al escalón más cercano de la escala de hardware del osciloscopio
+    let snapped_hw = ladder
+        .iter()
+        .copied()
+        .min_by(|a, b| (a.ln() - clamped_hw.ln()).abs().total_cmp(&(b.ln() - clamped_hw.ln()).abs()))
+        .unwrap_or(clamped_hw);
+
+    link.config.channels[ch].volts_div = snapped_hw;
+    link.config.channels[ch].probe = new_probe;
+    link.dirty = true;
 }
 
 /// Vertical zoom one ladder rung on `ch`; `inward` = finer volts/div.

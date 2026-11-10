@@ -10,7 +10,7 @@ use crate::gpu::Phosphor;
 use crate::view;
 
 use super::icons::{Icon, button};
-use super::knob::knob;
+use super::knob::{knob, stepper_ladder};
 use super::widgets::ladder_combo;
 use crate::derived::fmt_si;
 
@@ -18,10 +18,9 @@ pub fn show(
     ui: &mut egui::Ui,
     link: &mut Link,
     phosphor: &mut Phosphor,
-    deep: &mut crate::deep::DeepView,
+    _deep: &mut crate::deep::DeepView,
 ) {
-    timeline_group(ui, link, phosphor, deep);
-    show_inner(ui, link, phosphor, deep.on)
+    show_inner(ui, link, phosphor, false)
 }
 
 /// Timeline (deep) view: span more time than one record holds, at the
@@ -168,15 +167,7 @@ fn show_inner(ui: &mut egui::Ui, link: &mut Link, phosphor: &mut Phosphor, deep_
                 view::timebase_step(link, false);
             }
             let mut tb = view::timebase(link);
-            if knob(
-                ui,
-                "s/div",
-                &mut tb,
-                (tb_ladder[0], *tb_ladder.last().unwrap()),
-                Some(&tb_ladder),
-                view::s_per_div(view::startup_config().sample_rate, record_len),
-                |v| fmt_si(v, "s"),
-            ) {
+            if stepper_ladder(ui, "", &mut tb, &tb_ladder, |v| fmt_si(v, "s")) {
                 view::set_timebase(link, tb);
             }
         });

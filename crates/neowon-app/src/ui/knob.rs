@@ -128,3 +128,71 @@ mod tests {
         assert_eq!(nearest_rung(&l, 0.42), 0.5);
     }
 }
+
+/// Selector escalonado por pulsadores [-] [ Valor ] [+] para uso cómodo con ratón
+pub fn stepper_ladder(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f64,
+    ladder: &[f64],
+    fmt: impl Fn(f64) -> String,
+) -> bool {
+    let mut changed = false;
+    let idx = ladder
+        .iter()
+        .position(|&r| (r - *value).abs() < 1e-9)
+        .unwrap_or(0);
+
+    ui.horizontal(|ui| {
+        if !label.is_empty() {
+            ui.label(egui::RichText::new(label).strong());
+        }
+        let can_down = idx > 0;
+        if ui.add_enabled(can_down, egui::Button::new("◀").min_size(egui::vec2(22.0, 20.0))).clicked() {
+            *value = ladder[idx - 1];
+            changed = true;
+        }
+        let val_str = fmt(*value);
+        if ui.button(egui::RichText::new(val_str).monospace().strong()).clicked() {
+            *value = ladder[(idx + 1) % ladder.len()];
+            changed = true;
+        }
+        let can_up = idx + 1 < ladder.len();
+        if ui.add_enabled(can_up, egui::Button::new("▶").min_size(egui::vec2(22.0, 20.0))).clicked() {
+            *value = ladder[idx + 1];
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// Selector de valor numérico con pulsadores [-] [ Valor ] [+] para uso cómodo con ratón
+pub fn stepper_value(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f64,
+    step: f64,
+    range: (f64, f64),
+    default: f64,
+    fmt: impl Fn(f64) -> String,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if !label.is_empty() {
+            ui.label(label);
+        }
+        if ui.add(egui::Button::new("◀").min_size(egui::vec2(22.0, 20.0))).clicked() {
+            *value = (*value - step).clamp(range.0, range.1);
+            changed = true;
+        }
+        if ui.button(egui::RichText::new(fmt(*value)).monospace()).on_hover_text("Clic para restablecer a 0V").clicked() {
+            *value = default;
+            changed = true;
+        }
+        if ui.add(egui::Button::new("▶").min_size(egui::vec2(22.0, 20.0))).clicked() {
+            *value = (*value + step).clamp(range.0, range.1);
+            changed = true;
+        }
+    });
+    changed
+}

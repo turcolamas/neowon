@@ -101,6 +101,8 @@ pub struct Phosphor {
     /// single record. Arc'd because the whole resource is cloned into the
     /// render world every frame.
     pub deep: Option<std::sync::Arc<DeepFrame>>,
+    /// Deltas de offset software por canal para modo STOP / inspección
+    pub delta_offsets: [f32; 2],
 }
 
 /// A timeline reduced for display: min/max pairs per column per channel,
@@ -134,6 +136,7 @@ impl Default for Phosphor {
             hview: (0.5, 1.0),
             zoom_on: false,
             deep: None,
+            delta_offsets: [0.0, 0.0],
         }
     }
 }
@@ -181,7 +184,8 @@ struct Params {
     /// 1 = `wave` holds a reduced timeline: min/max pairs indexed two per
     /// column, with a gap mask packed after the channel blocks.
     deep: u32,
-    _pad: u32,
+    off0: f32,
+    off1: f32,
     col0: Vec4,
     col1: Vec4,
     col2: Vec4,
@@ -210,6 +214,7 @@ pub(crate) struct Buffers {
     do_raster: bool,
     /// Last applied zoom window — a change clears the phosphor.
     hview: (f64, f64),
+    offsets: [f32; 2],
 }
 
 #[derive(Resource)]
@@ -283,6 +288,7 @@ fn prepare_buffers(
                 n_samples: 0,
                 do_raster: false,
                 hview: phosphor.hview,
+                offsets: [0.0, 0.0],
             });
             return; // bind next frame
         }
@@ -320,7 +326,7 @@ fn prepare_buffers(
                 en[cap.ch] = 1;
             }
         }
-        if phosphor.new_frame && frame.seq != b.uploaded_seq {
+        if frame.seq != b.uploaded_seq || b.n_samples == 0 {
             // Records can be shorter than MAX_SAMPLES (WAV playback emits
             // exactly the new audio each tick); pack channels contiguously
             // at the actual length and tell the shader.
@@ -363,6 +369,14 @@ fn prepare_buffers(
     if (phosphor.hview.0 - b.hview.0).abs() > 1e-9 || (phosphor.hview.1 - b.hview.1).abs() > 1e-9 {
         decay = 0.0;
         b.hview = phosphor.hview;
+        b.do_raster = true;
+    }
+    if (phosphor.delta_offsets[0] - b.offsets[0]).abs() > 1e-5
+        || (phosphor.delta_offsets[1] - b.offsets[1]).abs() > 1e-5
+    {
+        decay = 0.0;
+        b.offsets = phosphor.delta_offsets;
+        b.do_raster = true;
     }
     let (center, span) = phosphor.hview;
     let span = span.clamp(0.01, 1.0);
@@ -391,7 +405,8 @@ fn prepare_buffers(
         view_start: (center - span / 2.0) as f32,
         view_span: span as f32,
         deep: deep.is_some() as u32,
-        _pad: 0,
+        off0: phosphor.delta_offsets[0],
+        off1: phosphor.delta_offsets[1],
         col0: Vec4::new(1.0, 0.85, 0.1, 1.0),
         col1: Vec4::new(0.2, 0.75, 1.0, 1.0),
         col2: Vec4::new(1.0, 0.35, 0.85, 1.0),

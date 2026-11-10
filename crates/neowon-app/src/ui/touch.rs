@@ -47,6 +47,8 @@ pub struct TouchState {
     last_world: Vec2,
     /// Time of the last press inside the plot (double-click detection).
     last_click: f64,
+    right_drag: bool,
+    right_last_world: Vec2,
 }
 
 fn world_pos(
@@ -81,29 +83,36 @@ pub fn trigger_line_y(l: &Layout, config: &ScopeConfig) -> f32 {
 /// trigger level line > waveform (pan).
 pub fn hit_drag(layout: &Layout, config: &ScopeConfig, world: Vec2) -> Drag {
     let left = layout.plot_center.x - layout.plot.width() / 2.0;
+    let right = layout.plot_center.x + layout.plot.width() / 2.0;
     let top = layout.plot_center.y + layout.plot.height() / 2.0;
-    if world.x - left < 20.0 {
+    // Marcadores de referencia cero (triángulo en el borde izquierdo)
+    if world.x - left < 24.0 {
         for ch in 0..2 {
             let c = &config.channels[ch];
             if c.enabled {
                 let y = layout.frac_to_world_y(c.offset as f32);
-                if (world.y - y).abs() < 12.0 {
+                if (world.y - y).abs() < 14.0 {
                     return Drag::OffsetMarker(ch);
                 }
             }
         }
     }
-    if top - world.y < 20.0 {
+    // Marcador de posición de trigger (triángulo en el borde superior)
+    if top - world.y < 24.0 {
         let x = left + config.position as f32 * layout.plot.width();
         if (world.x - x).abs() < 14.0 {
             return Drag::TriggerPosition;
         }
     }
-    if (world.y - trigger_line_y(layout, config)).abs() < 12.0 {
-        Drag::TriggerLevel
-    } else {
-        Drag::Waveform
+    // Marcador de nivel de trigger (triángulo en el borde derecho)
+    // Solo se activa en el triángulo derecho para no interferir en el centro de la pantalla
+    if right - world.x < 24.0 {
+        let ty = trigger_line_y(layout, config);
+        if (world.y - ty).abs() < 14.0 {
+            return Drag::TriggerLevel;
+        }
     }
+    Drag::Waveform
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -122,21 +131,43 @@ pub fn plot_pointer(
     mut phosphor: ResMut<Phosphor>,
     mut deep: ResMut<crate::deep::DeepView>,
     rec: Res<crate::record::Recorder>,
+    mut hist: ResMut<crate::record::History>,
 ) {
     // Measurement cursors (earlier in the chain) own the pointer while
     // dragging; egui owns it over panels.
     if cursors.dragging() {
         touch.drag = None;
+        touch.right_drag = false;
         return;
     }
-    if touch.drag.is_none() && egui_wants.wants_any_pointer_input() {
+    if touch.drag.is_none() && !touch.right_drag && egui_wants.wants_any_pointer_input() {
         wheel.clear();
         return;
     }
     let Some(world) = world_pos(&windows, &camera) else {
         touch.drag = None;
+        touch.right_drag = false;
         return;
     };
+
+    // --- Clic Derecho Sostenido: Desplazamiento Vertical de Waveform + Cero + Trigger ---
+    if mouse.just_pressed(MouseButton::Right) && on_plot(&layout, world) {
+        touch.right_drag = true;
+        touch.right_last_world = world;
+    }
+    if !mouse.pressed(MouseButton::Right) {
+        touch.right_drag = false;
+    } else if touch.right_drag {
+        let delta = world - touch.right_last_world;
+        touch.right_last_world = world;
+        if delta.y != 0.0 {
+            let dfrac = (delta.y / (10.0 * layout.div.y)) as f64;
+            let sel = link.selected.min(1);
+            let off = (link.config.channels[sel].offset + dfrac).clamp(-0.5, 0.5);
+            link.config.channels[sel].offset = off;
+            link.dirty = true;
+        }
+    }
 
     // Scroll: volts/div ladder on the selected channel; shift = horizontal
     // zoom of the record window at the pointer; a 2-D wheel's x axis pans
@@ -152,20 +183,28 @@ pub fn plot_pointer(
             steps[1] += d[1];
         }
         if steps[0].abs() >= 0.5 {
-            // Scroll up = zoom in (finer scale).
             let inward = steps[0] > 0.0;
-            if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
-                // Horizontal zoom: the time base, or the zoom window while
-                // zoom is on (view::hzoom owns that split).
+            if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+                // Ctrl + Rueda: Zoom vertical (volts/div) del canal seleccionado
+                let sel = link.selected.min(1);
+                view::zoom_channel(&mut link, sel, inward);
+            } else {
+                // Rueda normal: Zoom horizontal DENTRO de la captura (tope estricto al 100%)
                 let anchor = ((world.x - (layout.plot_center.x - layout.plot.width() / 2.0))
                     / layout.plot.width())
                 .clamp(0.0, 1.0);
                 let (c, s) = phosphor.hview;
                 let anchor = (c - s / 2.0) + anchor as f64 * s;
-                view::hzoom_timeline(&mut link, &mut phosphor, &mut deep, anchor, inward);
-            } else {
-                let sel = link.selected.min(1);
-                view::zoom_channel(&mut link, sel, inward);
+
+                if !inward && s >= 0.99 {
+                    // Ya está al 100%: fijar vista completa limpia sin desbordar ni activar timeline
+                    view::hview_home(&mut phosphor);
+                } else {
+                    view::hview_zoom(&mut phosphor, anchor, inward);
+                    if phosphor.hview.1 >= 0.999 {
+                        view::hview_home(&mut phosphor);
+                    }
+                }
             }
         }
         if steps[1].abs() >= 0.5 {
@@ -222,11 +261,13 @@ pub fn plot_pointer(
             link.dirty = true;
         }
         Drag::OffsetMarker(ch) => {
+            // Arrastre específico del triángulo de cero (borde izquierdo)
             let off = (link.config.channels[ch].offset + dfrac).clamp(-0.5, 0.5);
             link.config.channels[ch].offset = off;
             link.dirty = true;
         }
         Drag::TriggerLevel => {
+            // Arrastre específico del triángulo de trigger (borde derecho)
             let src = link.config.trigger.source.min(1);
             let ch = link.config.channels[src];
             let range = ch.volts_div * 10.0 * ch.probe;
@@ -235,15 +276,27 @@ pub fn plot_pointer(
             link.dirty = true;
         }
         Drag::Waveform => {
-            let sel = link.selected.min(1);
-            let off = (link.config.channels[sel].offset + dfrac).clamp(-0.5, 0.5);
-            link.config.channels[sel].offset = off;
-            link.dirty = true;
-            // Horizontal: the position control — trigger delay, or the zoom
-            // window while zoomed. The waveform follows the pointer.
-            let d = (delta.x / layout.plot.width()) as f64;
-            let newest = newest_time(&rec);
-            view::hposition_timeline(&mut link, &mut phosphor, &mut deep, newest, d);
+            // Clic izquierdo sostenido sobre la waveform:
+            // Nivel de trigger y nivel de referencia se mantienen COMPLETAMENTE FIJOS.
+            if !link.config.running && !view::zoom_active(&phosphor) {
+                // En modo STOP y sin zoom (vista 1:1 de captura total):
+                // Arrastrar horizontalmente navega suavemente entre las tramas del historial
+                let n = rec.frames.len();
+                if n > 1 {
+                    let cur = hist.active.unwrap_or(n.saturating_sub(1)) as f64;
+                    let step = (delta.x / 18.0) as f64;
+                    let new_idx = (cur + step).clamp(0.0, (n - 1) as f64).round() as usize;
+                    if Some(new_idx) != hist.active {
+                        hist.show(&mut link, &rec, new_idx);
+                    }
+                }
+            } else {
+                // Modo RUN o Modo Zoom:
+                // Desplazar lateralmente en el mismo sentido (pan horizontal).
+                let d = (delta.x / layout.plot.width()) as f64;
+                let newest = newest_time(&rec);
+                view::hposition_timeline(&mut link, &mut phosphor, &mut deep, newest, d);
+            }
         }
     }
 }
@@ -264,11 +317,23 @@ mod tests {
     }
 
     #[test]
-    fn near_trigger_line_drags_the_level() {
+    fn center_plot_near_trigger_line_is_waveform_pan() {
         let l = layout();
         let cfg = crate::view::startup_config();
         let y = trigger_line_y(&l, &cfg);
+        // En el centro del osciloscopio jamás debe arrastrarse el nivel de trigger
         let world = Vec2::new(l.plot_center.x, y + 5.0);
+        assert_eq!(hit_drag(&l, &cfg, world), Drag::Waveform);
+    }
+
+    #[test]
+    fn right_edge_near_trigger_triangle_drags_the_level() {
+        let l = layout();
+        let cfg = crate::view::startup_config();
+        let y = trigger_line_y(&l, &cfg);
+        let right = l.plot_center.x + l.plot.width() / 2.0;
+        // Solo en el triángulo del borde derecho debe arrastrarse el nivel de trigger
+        let world = Vec2::new(right - 5.0, y + 5.0);
         assert_eq!(hit_drag(&l, &cfg, world), Drag::TriggerLevel);
     }
 

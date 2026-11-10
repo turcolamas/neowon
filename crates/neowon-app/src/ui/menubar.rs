@@ -4,7 +4,7 @@
 //! and settings that are not part of an instrument setup.
 
 use bevy_egui::egui;
-use neowon_core::Sweep;
+use neowon_core::{AcqMode, Sweep};
 
 use crate::Link;
 use crate::derived::fmt_si;
@@ -31,7 +31,7 @@ pub fn show(
     l: &Layout,
     link: &mut Link,
     now: f64,
-    deep: &crate::deep::DeepView,
+    _deep: &crate::deep::DeepView,
     bar: &mut BarState<'_>,
 ) -> egui::Rect {
     let rect = l.points(Roi::MenuBar.rect(l));
@@ -41,101 +41,161 @@ pub fn show(
             ui.set_max_width(rect.width());
             ui.set_height(rect.height());
             ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                menus(ui, bar);
-                ui.separator();
-                if bar.sdr.active {
-                    let caps = link.sdr_caps();
-                    return sdr_status(ui, bar.sdr, caps, bar.refmap, &link.status, now);
-                }
-                // Run state badge (manual 8.5: Run = yellow, Stop = red).
-                let (label, color) = run_state(link, now);
-                badge(ui, label, color);
-                let record_len = crate::view::record_len(link);
-                let per_div = record_len as f64 / link.config.sample_rate / 10.0;
-                // While the timeline is on, the on-screen time/div is the
-                // window's, not the record's — show both rather than let the
-                // chrome claim a time base the display is not using.
-                let text = if deep.on {
-                    format!(
-                        "{}/div view   {}/div acq   {}",
-                        fmt_si(deep.seconds_per_div(), "s"),
-                        fmt_si(per_div, "s"),
-                        fmt_si(link.config.sample_rate, "S/s"),
-                    )
-                } else {
-                    format!(
-                        "{}/div   {}",
-                        fmt_si(per_div, "s"),
-                        fmt_si(link.config.sample_rate, "S/s"),
-                    )
-                };
-                ui.label(egui::RichText::new(text).monospace());
-                if deep.on {
-                    let (r, resp) =
-                        ui.allocate_exact_size(egui::vec2(112.0, 20.0), egui::Sense::hover());
-                    ui.painter().rect(
-                        r,
-                        4.0,
-                        egui::Color32::from_rgb(40, 44, 54),
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 200, 140)),
-                        egui::StrokeKind::Middle,
-                    );
-                    ui.painter().text(
-                        r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        format!("TIMELINE {:.0}%", deep.lost() * 100.0),
-                        egui::FontId::proportional(11.0),
-                        egui::Color32::from_rgb(80, 200, 140),
-                    );
-                    resp.on_hover_text(
-                        "Showing the acquisition timeline at full sample rate. \
-                         The percentage is how much of the window the instrument \
-                         was not acquiring in; those columns are marked in red.",
-                    );
-                }
-                // Slow time bases run the instrument in roll mode, where the
-                // record fills progressively and the trigger is not used —
-                // scopes always say so on screen.
-                if crate::view::is_roll(link.config.sample_rate) {
-                    let (r, resp) =
-                        ui.allocate_exact_size(egui::vec2(52.0, 20.0), egui::Sense::hover());
-                    ui.painter().rect(
-                        r,
-                        4.0,
-                        egui::Color32::from_rgb(40, 44, 54),
-                        egui::Stroke::new(1.0, WAIT_COLOR),
-                        egui::StrokeKind::Middle,
-                    );
-                    ui.painter().text(
-                        r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "ROLL",
-                        egui::FontId::proportional(11.0),
-                        WAIT_COLOR,
-                    );
-                    resp.on_hover_text(
-                        "Roll mode: at this time base the instrument streams \
-                         the record progressively and the trigger is not used.",
-                    );
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Fixed 8-char field: the counter widening a digit must
-                    // not nudge the device label beside it.
-                    let n = format!("#{}", link.frames_seen);
-                    ui.label(egui::RichText::new(format!("{n:>8}")).monospace())
-                        .on_hover_text(
-                            "Acquisitions since the app started. It should climb \
-                             steadily; a stalled counter means the trigger is \
-                             starving or the instrument stopped.",
-                        );
-                    if let Some(caps) = &link.caps {
-                        ui.weak(format!("{} · {}", caps.name(), caps.serial()));
-                        bar_error(ui, &link.status, now);
-                    } else {
-                        ui.weak(link.status.clone());
+                ui.add_space(8.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
+
+                // 1. Menús superiores
+                ui.menu_button("📁 Archivo", |ui| {
+                    let dir = crate::record::export_dir();
+                    if ui.button("Guardar configuración (.nws)…").clicked() {
+                        let p = dir.join("setup.nws");
+                        bar.script.inject(crate::script::Action::SessionSave(p.display().to_string()));
+                        ui.close();
+                    }
+                    if ui.button("Cargar configuración (.nws)…").clicked() {
+                        let p = dir.join("setup.nws");
+                        bar.script.inject(crate::script::Action::SessionLoad(p.display().to_string()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Guardar captura (.nwc)…").clicked() {
+                        let p = dir.join(format!("{}.nwc", crate::record::default_stem()));
+                        bar.script.inject(crate::script::Action::CapSave(p.display().to_string()));
+                        ui.close();
+                    }
+                    if ui.button("Exportar señal a CSV…").clicked() {
+                        let p = dir.join(format!("{}.csv", crate::record::default_stem()));
+                        bar.script.inject(crate::script::Action::Export("csv".into(), p.display().to_string()));
+                        ui.close();
                     }
                 });
+
+                ui.menu_button("🚗 Automotriz", |ui| {
+                    if ui.button("📋 Abrir Panel Automotriz").clicked() {
+                        bar.menus.reveal(crate::ui::Menu::Automotive);
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Categorías de Prueba:").strong().color(egui::Color32::from_rgb(255, 170, 0)));
+                    for cat in [
+                        picowon_auto::PresetCategory::Ignition,
+                        picowon_auto::PresetCategory::Injection,
+                        picowon_auto::PresetCategory::Sensors,
+                        picowon_auto::PresetCategory::Actuators,
+                        picowon_auto::PresetCategory::Networks,
+                        picowon_auto::PresetCategory::StartingCharging,
+                    ] {
+                        ui.menu_button(cat.label(), |ui| {
+                            let presets = picowon_auto::get_all_presets();
+                            for p in presets.iter().filter(|p| p.category == cat) {
+                                if ui.button(p.name).on_hover_text(p.description).clicked() {
+                                    bar.menus.reveal(crate::ui::Menu::Automotive);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                });
+
+                // Ayuda siempre visible en el extremo izquierdo con margen garantizado
+                let help_btn = egui::Button::new(
+                    egui::RichText::new("❓ Ayuda (F1)").size(11.0).strong().color(egui::Color32::from_rgb(110, 205, 255)),
+                )
+                .fill(egui::Color32::from_rgb(26, 34, 46))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 85, 125)))
+                .min_size(egui::vec2(0.0, 24.0));
+                if ui.add(help_btn).on_hover_text("Guía rápida de navegación con ratón y atajos de teclado (F1)").clicked() {
+                    bar.auto.help_window_open = !bar.auto.help_window_open;
+                }
+
+                ui.separator();
+
+                // 2. Cinta de Selección de Modos de la Suite PicoWon
+                for mode in crate::ui::automotive_dock::AppMode::ALL {
+                    let active = bar.auto.app_mode == mode;
+                    let btn = egui::Button::new(
+                        egui::RichText::new(mode.title())
+                            .size(11.0)
+                            .strong()
+                            .color(if active { egui::Color32::BLACK } else { egui::Color32::from_rgb(220, 225, 235) }),
+                    )
+                    .fill(if active {
+                        egui::Color32::from_rgb(255, 180, 40)
+                    } else {
+                        egui::Color32::from_rgb(32, 38, 50)
+                    })
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        if active {
+                            egui::Color32::from_rgb(255, 210, 80)
+                        } else {
+                            egui::Color32::from_rgb(52, 60, 78)
+                        },
+                    ))
+                    .min_size(egui::vec2(0.0, 24.0));
+
+                    if ui.add(btn).clicked() {
+                        bar.auto.switch_app_mode(mode, link);
+                        bar.auto.strip_chart_view_active = mode == crate::ui::automotive_dock::AppMode::Datalogger;
+                        if mode == crate::ui::automotive_dock::AppMode::CanLinWaveform {
+                            bar.menus.open(crate::ui::Menu::Decode);
+                        }
+                    }
+                }
+
+                ui.separator();
+
+                // 3. RUN / STOP estilo PicoScope 7 (botón grande prominente)
+                let running = link.config.running;
+                let (r_label, r_bg) = if !running {
+                    ("⏹ STOP", egui::Color32::from_rgb(205, 40, 40))
+                } else if matches!(link.config.trigger.sweep, Sweep::Normal | Sweep::Single) && now - link.last_frame_at > 0.5 {
+                    ("⏳ WAIT", egui::Color32::from_rgb(230, 115, 0))
+                } else {
+                    ("▶ RUN", egui::Color32::from_rgb(46, 125, 50))
+                };
+                let r_btn = egui::Button::new(egui::RichText::new(r_label).strong().color(egui::Color32::WHITE))
+                    .fill(r_bg)
+                    .min_size(egui::vec2(68.0, 24.0));
+                if ui.add(r_btn).on_hover_text("Conmutar RUN / STOP (Espacio)").clicked() {
+                    link.config.running = !running;
+                    link.dirty = true;
+                }
+
+                ui.separator();
+
+                // 4. AutoSetup
+                if ui.button(egui::RichText::new("⚡ AutoSetup").strong().color(egui::Color32::from_rgb(255, 200, 50))).clicked() {
+                    let _ = link.sup.commands.send(neowon_backend::Command::AutoSet);
+                }
+
+                // 5. Detección de Glitches / Peak Detect (Estilo PicoScope Glitch Catching)
+                let is_peak = link.config.acq == AcqMode::Peak;
+                let glitch_btn = egui::Button::new(
+                    egui::RichText::new(if is_peak { "⚡ Glitch: ON" } else { "⚡ Glitch: OFF" })
+                        .size(11.0)
+                        .strong()
+                        .color(if is_peak { egui::Color32::from_rgb(255, 230, 80) } else { egui::Color32::from_rgb(170, 180, 195) }),
+                )
+                .fill(if is_peak { egui::Color32::from_rgb(70, 50, 15) } else { egui::Color32::from_rgb(26, 30, 38) })
+                .stroke(egui::Stroke::new(1.0, if is_peak { egui::Color32::from_rgb(240, 180, 40) } else { egui::Color32::from_rgb(45, 55, 70) }));
+
+                if ui.add(glitch_btn).on_hover_text("Detección de Glitches / Transitorios Rápidos (Peak Detect)\nMantiene pulsos y espigas sub-microsegundo incluso en bases de tiempo lentas").clicked() {
+                    link.config.acq = if is_peak { AcqMode::Sample } else { AcqMode::Peak };
+                    link.dirty = true;
+                }
+
+                // 6. Botón rápido para ventana de Zoom estilo PicoScope 7
+                let z_open = bar.auto.zoom_window_open;
+                let z_btn = egui::Button::new(
+                    egui::RichText::new("🔍 Zoom")
+                        .size(11.0)
+                        .color(if z_open { egui::Color32::from_rgb(255, 215, 60) } else { egui::Color32::WHITE })
+                )
+                .fill(if z_open { egui::Color32::from_rgb(45, 52, 68) } else { egui::Color32::from_rgb(26, 30, 38) });
+                if ui.add(z_btn).on_hover_text("Mostrar u ocultar ventana flotante de Zoom").clicked() {
+                    bar.auto.zoom_window_open = !bar.auto.zoom_window_open;
+                }
             });
         });
     l.pixels(resp.response.rect)
@@ -265,54 +325,39 @@ pub struct BarState<'a> {
     pub viz: &'a mut crate::viz::three_d::Viz3dState,
     pub sdr: &'a crate::sdr::SdrState,
     pub refmap: &'a crate::refmap::RefMap,
+    pub auto: &'a mut crate::ui::automotive_dock::AutomotiveUiState,
+    pub rec: &'a crate::record::Recorder,
+    pub hist: &'a mut crate::record::History,
 }
 
 /// The workspace switch: SCOPE | SDR, first in the bar, the active one
 /// lit. Ctrl/⌘+1 and +2 do the same. One device claim at a time, so a
 /// switch releases one instrument and claims the other (`instrument`).
 fn mode_toggle(ui: &mut egui::Ui, bar: &mut BarState<'_>) {
-    use crate::script::Action;
-    let active = bar.sdr.active;
-    let key = |ui: &mut egui::Ui, k| ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, k));
-    let mut want = None;
-    if key(ui, egui::Key::Num1) {
-        want = Some(false);
-    }
-    if key(ui, egui::Key::Num2) {
-        want = Some(true);
-    }
+    let is_sc = bar.auto.strip_chart_view_active;
     ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        for (label, sdr, keys, what) in [
-            ("SCOPE", false, "⌘/Ctrl+1", "oscilloscope"),
-            ("SDR", true, "⌘/Ctrl+2", "software-defined radio"),
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (label, active, tip) in [
+            ("📊 OSCILOSCOPIO", !is_sc, "Modo Osciloscopio automotriz en tiempo real"),
+            ("📈 STRIP-CHART", is_sc, "Modo Registrador continuo Strip-Chart y Datalogger automotriz"),
         ] {
-            let on = active == sdr;
-            let text = egui::RichText::new(label).strong().color(if on {
+            let text = egui::RichText::new(label).strong().color(if active {
                 egui::Color32::BLACK
             } else {
-                egui::Color32::from_gray(200)
+                egui::Color32::from_gray(210)
             });
             let b = egui::Button::new(text)
-                .fill(if on {
-                    egui::Color32::from_rgb(120, 200, 255)
+                .fill(if active {
+                    egui::Color32::from_rgb(255, 175, 40)
                 } else {
-                    egui::Color32::from_rgb(34, 37, 44)
+                    egui::Color32::from_rgb(32, 36, 44)
                 })
-                .min_size(egui::vec2(62.0, 22.0));
-            if ui
-                .add(b)
-                .on_hover_text(format!("{what} workspace ({keys})"))
-                .clicked()
-            {
-                want = Some(sdr);
+                .min_size(egui::vec2(130.0, 24.0));
+            if ui.add(b).on_hover_text(tip).clicked() {
+                bar.auto.strip_chart_view_active = label.contains("STRIP");
             }
         }
     });
-    if let Some(sdr) = want.filter(|&s| s != active) {
-        bar.script
-            .inject(Action::Sdr(crate::sdr::SdrAction::Instrument(sdr)));
-    }
 }
 
 /// The drop-downs. Every item routes through a script action where one
@@ -325,6 +370,39 @@ fn menus(ui: &mut egui::Ui, bar: &mut BarState<'_>) {
     {
         mode_toggle(ui, bar);
         ui.separator();
+        if ui.button(egui::RichText::new("❓ Ayuda (F1)").color(egui::Color32::from_rgb(100, 200, 255))).on_hover_text("Guía rápida de navegación con ratón y atajos de teclado (F1)").clicked() {
+            bar.auto.help_window_open = !bar.auto.help_window_open;
+        }
+        ui.menu_button("🚗 Automotriz", |ui| {
+            if ui.button("❓ Guía de Navegación y Atajos (F1)").clicked() {
+                bar.auto.help_window_open = true;
+                ui.close();
+            }
+            if ui.button("📋 Abrir Panel Automotriz").clicked() {
+                bar.menus.reveal(crate::ui::Menu::Automotive);
+                ui.close();
+            }
+            ui.separator();
+            ui.label(egui::RichText::new("Categorías de Prueba:").strong().color(egui::Color32::from_rgb(255, 170, 0)));
+            for cat in [
+                picowon_auto::PresetCategory::Ignition,
+                picowon_auto::PresetCategory::Injection,
+                picowon_auto::PresetCategory::Sensors,
+                picowon_auto::PresetCategory::Actuators,
+                picowon_auto::PresetCategory::Networks,
+                picowon_auto::PresetCategory::StartingCharging,
+            ] {
+                ui.menu_button(cat.label(), |ui| {
+                    let presets = picowon_auto::get_all_presets();
+                    for p in presets.iter().filter(|p| p.category == cat) {
+                        if ui.button(p.name).on_hover_text(p.description).clicked() {
+                            bar.menus.reveal(crate::ui::Menu::Automotive);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
         ui.menu_button("File", |ui| {
             let dir = crate::record::export_dir();
             if ui.button("Save setup…").clicked() {

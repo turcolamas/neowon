@@ -4124,7 +4124,10 @@ dependencies = [
  "neowon-sim",
  "neowon-vds1022",
  "objc2-app-kit 0.3.2",
+ "picowon-auto",
  "png",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 
@@ -4971,6 +4974,19 @@ dependencies = [
  "indexmap",
  "serde",
  "serde_derive",
+]
+
+[[package]]
+name = "picowon-auto"
+version = "0.2.1"
+dependencies = [
+ "neowon-backend",
+ "neowon-core",
+ "neowon-dsp",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]

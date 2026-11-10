@@ -1,0 +1,15 @@
+[package]
+name = "picowon-auto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Diagnóstico Automotriz Avanzado: Presets Guiados, Reglas 720° Cigüeñal y DataLogger"
+
+[dependencies]
+neowon-core.workspace = true
+neowon-backend.workspace = true
+neowon-dsp.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

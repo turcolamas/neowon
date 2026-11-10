@@ -26,7 +26,8 @@ pub use fft::{Spectrum, Window, spectrum};
 pub use iq::{IqSpectrum, iq_spectrum};
 pub use math::{MathOp, math_trace};
 pub use measure::{
-    BasicStats, Measurements, basic_stats, estimate_frequency, measure, measure_envelope,
+    BasicStats, BichannelMeasurements, Measurements, basic_stats, bichannel_measure,
+    estimate_frequency, measure, measure_envelope,
 };
 pub use stats::StatTrack;
 pub use survey::{Survey, SurveyPlan, SurveyResult};

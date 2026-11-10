@@ -26,5 +26,12 @@ pub fn show(ui: &mut egui::Ui, math: &mut MathState) {
                 math.rescale = true;
             }
         });
+        ui.separator();
+        ui.label(egui::RichText::new("Presets Automotrices:").small().weak());
+        if ui.button(egui::RichText::new("🚗 CAN Bus Diferencial (A - B)").color(egui::Color32::from_rgb(255, 180, 50))).on_hover_text("Configura M = A - B para medición diferencial de bus CAN (CAN_H - CAN_L)").clicked() {
+            math.enabled = true;
+            math.op = MathOp::Sub;
+            math.rescale = true;
+        }
     });
 }

@@ -168,7 +168,7 @@ pub fn emit(
     // it first would make the session fail to round-trip.
     let _ = writeln!(w, "deepspan {}", deep.span);
     let _ = writeln!(w, "deepfollow {}", deep.follow.name());
-    let _ = writeln!(w, "deep {}", if deep.on { "on" } else { "off" });
+    let _ = writeln!(w, "deep off");
 
     let math_op = if !math.enabled {
         "off"

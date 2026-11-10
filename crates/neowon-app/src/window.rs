@@ -73,11 +73,12 @@ pub(crate) fn fit_display(
 pub(crate) fn sync_layout(
     windows: Query<&Window>,
     scale: Res<ui::UiScale>,
+    menus: Res<ui::MenuState>,
     mut layout: ResMut<Layout>,
     mut sprite: Query<(&mut Sprite, &mut Transform), With<PlotSprite>>,
 ) {
     let Ok(window) = windows.single() else { return };
-    let next = Layout::compute(window.width(), window.height(), scale.0);
+    let next = Layout::compute_ex(window.width(), window.height(), scale.0, menus.is_collapsed());
     if *layout != next {
         *layout = next;
     }
@@ -101,7 +102,7 @@ pub(crate) fn update_title(link: Res<Link>, mut windows: Query<&mut Window>) {
         return;
     };
     // On-screen chrome carries the state; the OS title stays quiet.
-    let title = format!("neowon — {}", link.status);
+    let title = format!("PicoWon — {}", link.status);
     if window.title != title {
         window.title = title;
     }

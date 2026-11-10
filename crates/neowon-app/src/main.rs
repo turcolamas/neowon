@@ -74,7 +74,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "neowon".into(),
+                title: "PicoWon Automotive - OWON VDS1022".into(),
                 resolution: [win_w, win_h].into(),
                 // Fixed position so ROI screenshots map 1:1 to screen space.
                 position: WindowPosition::At(IVec2::new(40, 40)),
@@ -112,6 +112,7 @@ fn main() {
         })
         .init_resource::<Layout>()
         .init_resource::<ui::layout::UiRects>()
+        .insert_resource(ClearColor(Color::srgb(0.0, 0.0, 0.0)))
         .init_resource::<ui::UiScale>()
         .init_resource::<autopeak::AutoPeak>()
         .init_resource::<deep::DeepView>()
@@ -119,6 +120,7 @@ fn main() {
         .init_resource::<ui::settings::Settings>()
         .init_resource::<ui::touch::TouchState>()
         .init_resource::<ui::MenuState>()
+        .init_resource::<ui::automotive_dock::AutomotiveUiState>()
         .init_resource::<derived::MathState>()
         .insert_resource(derived::MeasureState {
             guides: true,
@@ -167,13 +169,7 @@ fn main() {
         )
         .add_systems(
             EguiPrimaryContextPass,
-            (
-                ui::panel,
-                ui::sdr_view::show,
-                ui::catalog_window::show,
-                ui::stations_window::show,
-            )
-                .chain(),
+            ui::panel,
         )
         .add_systems(
             Update,

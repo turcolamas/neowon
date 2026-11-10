@@ -14,17 +14,94 @@ pub(crate) fn draw_graticule(layout: Res<Layout>, mut gizmos: Gizmos) {
     let w = layout.plot.width();
     let h = layout.plot.height();
     let o = layout.plot_center;
-    let dim = Color::srgba(0.5, 0.55, 0.6, 0.25);
-    let axis = Color::srgba(0.6, 0.65, 0.7, 0.6);
-    for i in 0..=H_DIVS {
-        let x = o.x - w / 2.0 + i as f32 * layout.div.x;
-        let c = if i == H_DIVS / 2 { axis } else { dim };
-        gizmos.line_2d(Vec2::new(x, o.y - h / 2.0), Vec2::new(x, o.y + h / 2.0), c);
+
+    let x_left = o.x - w / 2.0;
+    let x_right = o.x + w / 2.0;
+    let y_bottom = o.y - h / 2.0;
+    let y_top = o.y + h / 2.0;
+
+    // Colores SOFT (sutiles, elegantes, no deslumbrantes sobre fondo negro puro)
+    let border_color = Color::srgba(0.38, 0.44, 0.52, 0.40);
+    let axis_color = Color::srgba(0.48, 0.56, 0.66, 0.50);
+    let dot_color = Color::srgba(0.38, 0.44, 0.52, 0.28);
+    let tick_color = Color::srgba(0.44, 0.52, 0.62, 0.38);
+
+    // 1. Marco perimetral exterior
+    gizmos.line_2d(Vec2::new(x_left, y_bottom), Vec2::new(x_right, y_bottom), border_color);
+    gizmos.line_2d(Vec2::new(x_left, y_top), Vec2::new(x_right, y_top), border_color);
+    gizmos.line_2d(Vec2::new(x_left, y_bottom), Vec2::new(x_left, y_top), border_color);
+    gizmos.line_2d(Vec2::new(x_right, y_bottom), Vec2::new(x_right, y_top), border_color);
+
+    // 2. Ejes centrales continuos (X = 0, Y = 0)
+    gizmos.line_2d(Vec2::new(o.x, y_bottom), Vec2::new(o.x, y_top), axis_color);
+    gizmos.line_2d(Vec2::new(x_left, o.y), Vec2::new(x_right, o.y), axis_color);
+
+    // 3. Lineas de cuadricula internas con puntos soft (paso 0.2 div)
+    let sub_steps_v = V_DIVS * 5;
+    let dy = layout.div.y / 5.0;
+    for i in 1..H_DIVS {
+        if i == H_DIVS / 2 {
+            continue; // Eje central vertical ya continuo
+        }
+        let x = x_left + i as f32 * layout.div.x;
+        for s in 0..=sub_steps_v {
+            let y = y_bottom + s as f32 * dy;
+            gizmos.line_2d(Vec2::new(x, y - 0.5), Vec2::new(x, y + 0.5), dot_color);
+        }
     }
-    for i in 0..=V_DIVS {
-        let y = o.y - h / 2.0 + i as f32 * layout.div.y;
-        let c = if i == V_DIVS / 2 { axis } else { dim };
-        gizmos.line_2d(Vec2::new(o.x - w / 2.0, y), Vec2::new(o.x + w / 2.0, y), c);
+
+    let sub_steps_h = H_DIVS * 5;
+    let dx = layout.div.x / 5.0;
+    for j in 1..V_DIVS {
+        if j == V_DIVS / 2 {
+            continue; // Eje central horizontal ya continuo
+        }
+        let y = y_bottom + j as f32 * layout.div.y;
+        for s in 0..=sub_steps_h {
+            let x = x_left + s as f32 * dx;
+            gizmos.line_2d(Vec2::new(x - 0.5, y), Vec2::new(x + 0.5, y), dot_color);
+        }
+    }
+
+    // 4. Marcas de calibracion soft sobre el eje horizontal central
+    for s in 0..=sub_steps_h {
+        let x = x_left + s as f32 * dx;
+        let tick_len = if s % 5 == 0 { 4.0 } else { 2.0 };
+        gizmos.line_2d(Vec2::new(x, o.y - tick_len), Vec2::new(x, o.y + tick_len), tick_color);
+    }
+
+    // 5. Marcas de calibracion soft sobre el eje vertical central
+    for s in 0..=sub_steps_v {
+        let y = y_bottom + s as f32 * dy;
+        let tick_len = if s % 5 == 0 { 4.0 } else { 2.0 };
+        gizmos.line_2d(Vec2::new(o.x - tick_len, y), Vec2::new(o.x + tick_len, y), tick_color);
+    }
+
+    // 6. Marcas de calibracion en los bordes exteriores (superior e inferior hacia adentro)
+    for s in 0..=sub_steps_h {
+        let x = x_left + s as f32 * dx;
+        let tick_len = if s % 5 == 0 { 3.5 } else { 2.0 };
+        gizmos.line_2d(Vec2::new(x, y_top), Vec2::new(x, y_top - tick_len), tick_color);
+        gizmos.line_2d(Vec2::new(x, y_bottom), Vec2::new(x, y_bottom + tick_len), tick_color);
+    }
+
+    // 7. Marcas de calibracion en los bordes exteriores (izquierdo y derecho hacia adentro)
+    for s in 0..=sub_steps_v {
+        let y = y_bottom + s as f32 * dy;
+        let tick_len = if s % 5 == 0 { 3.5 } else { 2.0 };
+        gizmos.line_2d(Vec2::new(x_left, y), Vec2::new(x_left + tick_len, y), tick_color);
+        gizmos.line_2d(Vec2::new(x_right, y), Vec2::new(x_right - tick_len, y), tick_color);
+    }
+
+    // 8. Cruces de calibracion soft (+) a mitad de cuadrante (+-5 div H, +-2.5 div V)
+    for sx in [-5.0, 5.0] {
+        for sy in [-2.5, 2.5] {
+            let cx = o.x + sx * layout.div.x;
+            let cy = o.y + sy * layout.div.y;
+            let arm = 3.5;
+            gizmos.line_2d(Vec2::new(cx - arm, cy), Vec2::new(cx + arm, cy), tick_color);
+            gizmos.line_2d(Vec2::new(cx, cy - arm), Vec2::new(cx, cy + arm), tick_color);
+        }
     }
 }
 
@@ -39,7 +116,7 @@ pub(crate) fn draw_trigger(link: Res<Link>, layout: Res<Layout>, mut gizmos: Giz
     let ch = &link.config.channels[src];
     let range = ch.volts_div * 10.0 * ch.probe;
     // Fraction of full (10 div) range; the display window is +-4 div.
-    let frac = (link.config.trigger.level / range + ch.offset).clamp(-0.44, 0.44);
+    let frac = (link.config.trigger.level / range + ch.offset).clamp(-0.49, 0.49);
     let y = layout.frac_to_world_y(frac as f32);
     gizmos.line_2d(
         Vec2::new(o.x - w / 2.0, y),
@@ -61,7 +138,7 @@ pub(crate) fn draw_pf_mask(pf: Res<derived::PfState>, layout: Res<Layout>, mut g
     let step = (n / 500).max(1);
     let x_at = |i: usize| o.x - w / 2.0 + i as f32 / (n - 1).max(1) as f32 * w;
     // The display window is +-100 counts (+-4 div); pin beyond that.
-    let y_at = |raw: f32| layout.frac_to_world_y(raw.clamp(-100.0, 100.0) / 250.0);
+    let y_at = |raw: f32| layout.frac_to_world_y(raw.clamp(-125.0, 125.0) / 250.0);
     let color = Color::srgba(0.2, 0.6, 0.3, 0.6);
     for bounds in [&mask.lo, &mask.hi] {
         let points: Vec<Vec2> = (0..n)
@@ -113,7 +190,7 @@ pub(crate) fn draw_guides(
     ];
     for (v, alpha) in lines {
         let frac = (((v - zero) / lsb) / 250.0) as f32;
-        if frac.abs() > 0.4 {
+        if frac.abs() > 0.49 {
             continue; // outside the visible +-4-division window
         }
         let y = layout.frac_to_world_y(frac);

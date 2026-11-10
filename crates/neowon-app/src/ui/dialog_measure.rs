@@ -4,17 +4,22 @@ use crate::derived::{Band, METRICS, MeasureState, SLOT_NAMES, SLOTS, fmt, fmt_op
 
 pub fn show(ui: &mut egui::Ui, meas: &mut MeasureState) {
     ui.strong("Measurements");
-    if ui
-        .button("Open measurements window")
-        .on_hover_text(
-            "The full table with statistics and trends. Eighteen metrics do \
-             not fit in the rail, so they get a window that can be sized and \
-             placed.",
-        )
-        .clicked()
-    {
-        meas.window = true;
-    }
+    ui.horizontal(|ui| {
+        if ui
+            .button("Open measurements window")
+            .on_hover_text(
+                "The full table with statistics and trends. Eighteen metrics do \
+                 not fit in the rail, so they get a window that can be sized and \
+                 placed.",
+            )
+            .clicked()
+        {
+            meas.window = true;
+        }
+        if ui.button("⚙ Configurar...").clicked() {
+            meas.config_dialog_open = true;
+        }
+    });
     ui.horizontal(|ui| {
         ui.label("stats");
         for (slot, name) in SLOT_NAMES.iter().enumerate() {
@@ -46,6 +51,9 @@ pub fn show(ui: &mut egui::Ui, meas: &mut MeasureState) {
                 // Compact: values only; hover a value for its running
                 // statistics (mean/min/max/sigma/n).
                 for (i, (name, get, unit)) in METRICS.iter().enumerate() {
+                    if !meas.show_metric[i] {
+                        continue;
+                    }
                     ui.label(*name);
                     for slot in 0..SLOTS {
                         if meas.latest[slot].is_none() {

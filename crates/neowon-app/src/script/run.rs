@@ -101,8 +101,7 @@ pub fn run_script(
                 link.dirty = true;
             }
             Action::Probe(ch, p) => {
-                link.config.channels[ch].probe = p;
-                link.dirty = true;
+                crate::view::set_channel_probe(&mut link, ch, p);
             }
             Action::Offset(ch, o) => {
                 link.config.channels[ch].offset = o;

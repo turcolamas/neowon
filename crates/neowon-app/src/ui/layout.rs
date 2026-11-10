@@ -9,17 +9,19 @@ use bevy::math::Vec2;
 use bevy::prelude::Resource;
 use bevy_egui::egui::{Pos2, Rect, Vec2 as EVec2};
 
-pub const MENU_H: f32 = 36.0;
-pub const FRONT_PANEL_H: f32 = 96.0;
-pub const DIALOG_W: f32 = 320.0;
-pub const DESC_H: f32 = 54.0;
+pub const MENU_H: f32 = 44.0;       // Barra superior estilo PicoScope 7 (Scope, Samples, Trigger, Waveforms)
+pub const LEFT_RAIL_W: f32 = 172.0;  // Columna izquierda para Canales y Herramientas (front_panel)
+pub const FRONT_PANEL_H: f32 = 46.0;
+pub const DIALOG_W: f32 = 264.0;    // Cajón derecho para submenús profundos (Automotriz, Ajustes, etc.)
+pub const RIBBON_H: f32 = 24.0;     // Cinta superior externa
+pub const DESC_H: f32 = 46.0;       // Barra inferior para lecturas en vivo de CH1/CH2 (descriptors)
 const DESC_GAP: f32 = 4.0;
 const MARGIN: f32 = 8.0;
 
 /// Graticule: the reference divides the grid into 8 vertical x 10
 /// horizontal divisions.
-pub const H_DIVS: i32 = 10;
-pub const V_DIVS: i32 = 8;
+pub const H_DIVS: i32 = 20;
+pub const V_DIVS: i32 = 10;
 
 /// Smallest window the layout stays usable at (also the Window resize
 /// constraint).
@@ -63,6 +65,7 @@ pub struct Layout {
     pub scale: f32,
     pub window: EVec2,
     pub menu_bar: Rect,
+    pub ribbon: Rect,
     pub plot: Rect,
     pub descriptors: Rect,
     pub dialog: Rect,
@@ -83,44 +86,63 @@ impl Layout {
     /// Chrome sized in logical pixels for `scale`: at a 2x zoom factor the
     /// dock has to be twice as many pixels wide to hold the same content.
     pub fn compute(win_w: f32, win_h: f32, scale: f32) -> Self {
+        Self::compute_ex(win_w, win_h, scale, false)
+    }
+
+    /// Computa la distribución de pantalla permitiendo colapsar el dock derecho a 0 px
+    /// para extender la cuadrícula del osciloscopio en todo el ancho de pantalla.
+    pub fn compute_ex(win_w: f32, win_h: f32, scale: f32, dock_collapsed: bool) -> Self {
         let scale = scale.clamp(UI_SCALE_RANGE.0, UI_SCALE_RANGE.1);
         let win_w = win_w.max(MIN_W * scale);
         let win_h = win_h.max(MIN_H * scale);
         let mid_top = MENU_H * scale;
-        let mid_bottom = win_h - FRONT_PANEL_H * scale;
+        let left_w = LEFT_RAIL_W * scale;
+        let dialog_w = if dock_collapsed { 0.0 } else { DIALOG_W * scale };
+        let margin = MARGIN * scale;
+        let desc_h = DESC_H * scale;
+        let desc_gap = DESC_GAP * scale;
 
-        // The plot stretches to fill the middle area (a scope grid's
-        // divisions are just rectangles). The settings dock is always
-        // visible on the right — the Photoshop/Blender model — so the plot
-        // stops at its edge.
-        let (margin, dialog_w, desc_h, desc_gap) = (
-            MARGIN * scale,
-            DIALOG_W * scale,
-            DESC_H * scale,
-            DESC_GAP * scale,
+        // Barra superior de herramientas estilo PicoScope 7
+        let menu_bar = Rect::from_min_max(Pos2::ZERO, Pos2::new(win_w, mid_top));
+
+        // Riel izquierdo de canales y accesos rápidos (ocupa todo el lateral izquierdo)
+        let front_panel = Rect::from_min_max(
+            Pos2::new(0.0, mid_top),
+            Pos2::new(left_w, win_h),
         );
+
+        // Cajón derecho para submenús detallados (ocupa todo el lateral derecho, o 0 px si colapsado)
+        let dialog = Rect::from_min_max(
+            Pos2::new(win_w - dialog_w, mid_top),
+            Pos2::new(win_w, win_h),
+        );
+
+        // Barra inferior de mediciones automotrices en vivo
+        let descriptors = Rect::from_min_max(
+            Pos2::new(left_w + margin, win_h - desc_h - margin),
+            Pos2::new(win_w - dialog_w - margin, win_h - margin),
+        );
+
+        // Cuadrícula del osciloscopio: entre el riel izquierdo y el cajón derecho (se expande a 100% si colapsado)
         let plot = Rect::from_min_max(
-            Pos2::new(margin, mid_top + margin),
-            Pos2::new(
-                win_w - dialog_w - margin,
-                mid_bottom - desc_gap - desc_h - margin,
-            ),
+            Pos2::new(left_w + margin, mid_top + margin),
+            Pos2::new(win_w - dialog_w - margin, descriptors.top() - desc_gap),
         );
-        let descriptors = Rect::from_min_size(
-            Pos2::new(plot.left(), plot.bottom() + desc_gap),
-            EVec2::new(plot.width(), desc_h),
+
+        let ribbon = Rect::from_min_max(
+            Pos2::new(plot.left(), mid_top + 2.0),
+            Pos2::new(plot.right(), mid_top + 2.0 + (RIBBON_H * scale).min(plot.height() * 0.1)),
         );
+
         Self {
             scale,
             window: EVec2::new(win_w, win_h),
-            menu_bar: Rect::from_min_max(Pos2::ZERO, Pos2::new(win_w, mid_top)),
+            menu_bar,
+            ribbon,
             plot,
             descriptors,
-            dialog: Rect::from_min_max(
-                Pos2::new(win_w - dialog_w, mid_top),
-                Pos2::new(win_w, mid_bottom),
-            ),
-            front_panel: Rect::from_min_max(Pos2::new(0.0, mid_bottom), Pos2::new(win_w, win_h)),
+            dialog,
+            front_panel,
             plot_center: Vec2::new(plot.center().x - win_w / 2.0, win_h / 2.0 - plot.center().y),
             div: Vec2::new(plot.width() / H_DIVS as f32, plot.height() / V_DIVS as f32),
         }
@@ -129,7 +151,7 @@ impl Layout {
     /// Screen y of a value expressed as a fraction of the full 10-division
     /// encoding (visible window = ±4 of 8 shown divisions), in world space.
     pub fn frac_to_world_y(&self, frac: f32) -> f32 {
-        self.plot_center.y + frac * 10.0 * self.div.y
+        self.plot_center.y + frac * V_DIVS as f32 * self.div.y
     }
 
     /// Logical-pixel rect -> egui points (egui's screen shrinks by the zoom
@@ -180,6 +202,7 @@ impl UiRects {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Roi {
     MenuBar,
+    Ribbon,
     Plot,
     Descriptors,
     Dialog,
@@ -191,8 +214,9 @@ pub enum Roi {
 }
 
 impl Roi {
-    pub const ALL: [Roi; 7] = [
+    pub const ALL: [Roi; 8] = [
         Roi::MenuBar,
+        Roi::Ribbon,
         Roi::Plot,
         Roi::Descriptors,
         Roi::Dialog,
@@ -204,6 +228,7 @@ impl Roi {
     pub fn name(self) -> &'static str {
         match self {
             Roi::MenuBar => "menu_bar",
+            Roi::Ribbon => "ribbon",
             Roi::Plot => "plot",
             Roi::Descriptors => "descriptors",
             Roi::Dialog => "dialog",
@@ -216,6 +241,7 @@ impl Roi {
     pub fn rect(self, l: &Layout) -> Rect {
         match self {
             Roi::MenuBar => l.menu_bar,
+            Roi::Ribbon => l.ribbon,
             Roi::Plot => l.plot,
             Roi::Descriptors => l.descriptors,
             Roi::Dialog => l.dialog,
@@ -310,7 +336,12 @@ mod tests {
             assert!((l.dialog.width() - DIALOG_W * s).abs() < 1e-3);
             assert_eq!(l.dialog.right(), w);
             assert_eq!(l.menu_bar.width(), w);
-            assert_eq!(l.front_panel.width(), w);
+            assert_eq!(l.dialog.bottom(), h);
+            assert!((l.front_panel.width() - LEFT_RAIL_W * s).abs() < 1e-3);
+
+            assert_eq!(l.front_panel.bottom(), h);
+
+            assert!(plot.left() >= l.front_panel.right());
             // The plot stays usefully large — in divisions, not pixels, so
             // the check means the same thing at every scale.
             assert!(plot.width() / s >= 580.0, "{w}x{h}@{s}: plot {plot:?}");

@@ -80,6 +80,16 @@ pub struct Measurements {
     pub nwidth: Option<f64>,
     pub pduty: Option<f64>,
     pub nduty: Option<f64>,
+    pub cycle_vrms: Option<f64>,
+    pub slew_rate: Option<f64>,
+}
+
+/// Cross-channel measurements between CH1 and CH2.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BichannelMeasurements {
+    pub rise_delay: Option<f64>,
+    pub fall_delay: Option<f64>,
+    pub phase_deg: Option<f64>,
 }
 
 /// A mid-level crossing, in fractional sample time.
@@ -374,8 +384,102 @@ pub fn measure(cap: &ChannelCapture, sample_rate: f64) -> Option<Measurements> {
     if amp_r >= 8.0 {
         m.rise = acc(true);
         m.fall = acc(false);
+        if let Some(tr) = m.rise {
+            if tr > 1e-12 {
+                m.slew_rate = Some((0.80 * m.vamp) / (tr * 1e6)); // V/us
+            }
+        }
     }
+
+    // Cycle Vrms: calculated strictly over complete integer periods
+    if rises.len() >= 2 {
+        let first_idx = rises[0].round() as usize;
+        let last_idx = rises.last().unwrap().round() as usize;
+        if last_idx > first_idx + 1 && last_idx <= raw.len() {
+            let slice = &raw[first_idx..last_idx];
+            let zero = z / lsb;
+            let (mut sum, mut sq) = (0.0f64, 0.0f64);
+            for &r in slice {
+                let v = r as f64;
+                sum += v;
+                sq += v * v;
+            }
+            let n = slice.len() as f64;
+            let mean = sum / n;
+            let mean_sq = sq / n;
+            let total = mean_sq + 2.0 * zero * mean + zero * zero;
+            m.cycle_vrms = Some(total.max(0.0).sqrt() * lsb);
+        }
+    }
+
     Some(m)
+}
+
+/// Measures cross-channel parameters (RiseDelay 1->2, FallDelay 1->2, and Phase)
+/// between two synchronously captured channels.
+pub fn bichannel_measure(
+    cap1: &ChannelCapture,
+    cap2: &ChannelCapture,
+    sample_rate: f64,
+) -> Option<BichannelMeasurements> {
+    if cap1.data.len() < 8 || cap2.data.len() < 8 || sample_rate <= 0.0 {
+        return None;
+    }
+    let dt = 1.0 / sample_rate;
+    let rs1 = raw_stats(&cap1.data)?;
+    let rs2 = raw_stats(&cap2.data)?;
+    let span1 = (rs1.max - rs1.min) as f64;
+    let span2 = (rs2.max - rs2.min) as f64;
+    if span1 < 8.0 || span2 < 8.0 {
+        return None;
+    }
+    let mid1 = (rs1.max + rs1.min) as f64 / 2.0;
+    let mid2 = (rs2.max + rs2.min) as f64 / 2.0;
+    let hyst1 = (span1 / 8.0).max(2.0);
+    let hyst2 = (span2 / 8.0).max(2.0);
+    let cr1 = crossings(&cap1.data, mid1, hyst1);
+    let cr2 = crossings(&cap2.data, mid2, hyst2);
+
+    let rises1: Vec<f64> = cr1.iter().filter(|c| c.rising).map(|c| c.t).collect();
+    let rises2: Vec<f64> = cr2.iter().filter(|c| c.rising).map(|c| c.t).collect();
+    let falls1: Vec<f64> = cr1.iter().filter(|c| !c.rising).map(|c| c.t).collect();
+    let falls2: Vec<f64> = cr2.iter().filter(|c| !c.rising).map(|c| c.t).collect();
+
+    let mut out = BichannelMeasurements::default();
+
+    if !rises1.is_empty() && !rises2.is_empty() {
+        let mut delays = Vec::new();
+        for &r1 in &rises1 {
+            if let Some(&r2) = rises2.iter().find(|&&r| r >= r1) {
+                delays.push((r2 - r1) * dt);
+            }
+        }
+        if !delays.is_empty() {
+            let avg_delay = delays.iter().sum::<f64>() / delays.len() as f64;
+            out.rise_delay = Some(avg_delay);
+
+            if rises1.len() >= 2 {
+                let p1 = (rises1.last().unwrap() - rises1[0]) / (rises1.len() - 1) as f64 * dt;
+                if p1 > 0.0 {
+                    out.phase_deg = Some(((avg_delay / p1) * 360.0) % 360.0);
+                }
+            }
+        }
+    }
+
+    if !falls1.is_empty() && !falls2.is_empty() {
+        let mut delays = Vec::new();
+        for &f1 in &falls1 {
+            if let Some(&f2) = falls2.iter().find(|&&f| f >= f1) {
+                delays.push((f2 - f1) * dt);
+            }
+        }
+        if !delays.is_empty() {
+            out.fall_delay = Some(delays.iter().sum::<f64>() / delays.len() as f64);
+        }
+    }
+
+    Some(out)
 }
 
 /// Estimate the dominant frequency by hysteresis threshold crossings at the

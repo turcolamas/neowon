@@ -16,6 +16,14 @@ use crate::Link;
 /// dialog exposes it.
 pub const DEFAULT_BUDGET: usize = 2 << 30;
 
+
+
+/// Límite estricto del búfer circular de tramas en RAM (FIFO).
+
+/// Mantiene un historial ágil, manejable y ligero de hasta 50 tramas.
+
+pub const MAX_FRAMES_IN_RAM: usize = 50;
+
 /// Samples per tile in the min/max summaries. 64 costs ~3 % of a record's
 /// memory and lets a wide timeline window be drawn from summaries instead
 /// of from every sample.
@@ -132,6 +140,14 @@ impl Recorder {
                 .saturating_sub(self.frames[..drop].iter().map(frame_bytes).sum::<usize>());
             self.frames.drain(..drop);
             self.tiles.drain(..drop);
+        }
+
+        // Búfer circular estricto de hasta 50 tramas en memoria RAM
+        while self.frames.len() > MAX_FRAMES_IN_RAM {
+            let drop_bytes = frame_bytes(&self.frames[0]);
+            self.bytes = self.bytes.saturating_sub(drop_bytes);
+            self.frames.remove(0);
+            self.tiles.remove(0);
         }
         debug_assert_eq!(self.frames.len(), self.tiles.len());
     }

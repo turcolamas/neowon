@@ -21,6 +21,7 @@ use crate::record::Recorder;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Menu {
+    Automotive,
     Channel(usize),
     Horizontal,
     Trigger,
@@ -37,6 +38,7 @@ pub enum Menu {
 impl Menu {
     pub fn title(self) -> &'static str {
         match self {
+            Menu::Automotive => "🚗 Diagnóstico Automotriz",
             Menu::Channel(ch) => match ch {
                 0 => "Channel 1",
                 1 => "Channel 2",
@@ -51,13 +53,14 @@ impl Menu {
             Menu::Cursor => "Cursors",
             Menu::Utility => "Utility",
             Menu::Record => "Record / Export",
-            Menu::Decode => "Decode",
+            Menu::Decode => "🔢 Decodificador Serie / Bus (CAN/LIN)",
         }
     }
 
     /// Stable name: the `layout` dump and the `dock` action share it.
     pub fn name(self) -> &'static str {
         match self {
+            Menu::Automotive => "automotive",
             Menu::Channel(0) => "channel0",
             Menu::Channel(1) => "channel1",
             Menu::Channel(_) => "channel",
@@ -76,6 +79,7 @@ impl Menu {
 
     pub fn from_name(s: &str) -> Option<Self> {
         Some(match s {
+            "automotive" => Menu::Automotive,
             "channel0" => Menu::Channel(0),
             "channel1" => Menu::Channel(1),
             "horizontal" => Menu::Horizontal,
@@ -102,18 +106,32 @@ pub struct MenuState {
     /// the front panel or the View menu is useless if it lands off-screen in
     /// the scrolled rail.
     focus: Option<Menu>,
+    pub collapsed: bool,
 }
 
 impl Default for MenuState {
     fn default() -> Self {
         Self {
-            open: vec![Menu::Trigger],
+            open: vec![Menu::Automotive, Menu::Trigger],
             focus: None,
+            collapsed: false,
         }
     }
 }
 
 impl MenuState {
+    pub fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    pub fn set_collapsed(&mut self, val: bool) {
+        self.collapsed = val;
+    }
+
+    pub fn toggle_collapsed(&mut self) {
+        self.collapsed = !self.collapsed;
+    }
+
     pub fn is_open(&self, m: Menu) -> bool {
         self.open.contains(&m)
     }
@@ -187,19 +205,43 @@ pub fn show(
     ap: &mut crate::autopeak::AutoPeak,
     deep: &mut crate::deep::DeepView,
     dec: &mut crate::decode::DecodeState,
+    auto: &mut crate::ui::automotive_dock::AutomotiveUiState,
 ) -> egui::Rect {
+    if menus.collapsed {
+        let win_w = l.points(l.menu_bar).width();
+        let uncollapse_rect = egui::Rect::from_min_size(
+            egui::pos2(win_w - 76.0, l.points(l.menu_bar).bottom() + 6.0),
+            egui::vec2(70.0, 24.0),
+        );
+        let resp = egui::Area::new("dock_uncollapse".into())
+            .fixed_pos(uncollapse_rect.min)
+            .show(ctx, |ui| {
+                let btn = egui::Button::new(
+                    egui::RichText::new("◀ Panel")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(220, 235, 255)),
+                )
+                .fill(egui::Color32::from_rgb(28, 34, 48))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 90, 120)));
+                if ui.add(btn).on_hover_text("Desplegar panel de control lateral").clicked() {
+                    menus.collapsed = false;
+                }
+            });
+        return l.pixels(resp.response.rect);
+    }
+
     let rect = l.points(Roi::Dialog.rect(l));
     let mut frame = egui::Frame::new();
     frame.fill = egui::Color32::from_rgb(12, 14, 18);
     frame.stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(50));
     frame.inner_margin = 6.0.into();
 
-    const SECTIONS: [Menu; 10] = [
+    const SECTIONS: [Menu; 9] = [
+        Menu::Automotive,
         Menu::Trigger,
         Menu::Horizontal,
         Menu::Acquire,
-        Menu::Channel(0),
-        Menu::Channel(1),
         Menu::Math,
         Menu::Measure,
         Menu::Cursor,
@@ -231,10 +273,34 @@ pub fn show(
                     .show(ui, |ui| {
                         ui.set_max_width(rect.width() - 24.0);
                         ui.set_min_width(rect.width() - 24.0);
-                        view_toolbar(ui, link, phosphor);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("PANEL DE CONTROL").strong().size(11.0).color(egui::Color32::from_gray(190)));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("✕ Minimizar").on_hover_text("Minimizar dock lateral para expandir cuadrícula al 100%").clicked() {
+                                    menus.collapsed = true;
+                                }
+                                if ui.button("⮟ Cerrar Todo").on_hover_text("Cerrar todas las secciones abiertas del dock").clicked() {
+                                    menus.set_open(Vec::new());
+                                }
+                            });
+                        });
+                        ui.add_space(2.0);
+                        ui.separator();
+                        ui.add_space(2.0);
+
+                        // Si se abrió configuración detallada de un canal desde el riel izquierdo
+                        for ch in 0..2 {
+                            if menus.is_open(Menu::Channel(ch)) {
+                                section(ui, menus, Menu::Channel(ch), |ui, _| {
+                                    dialog_channel::show(ui, link, ch, &mut auto.dsp[ch]);
+                                });
+                            }
+                        }
+
                         for m in SECTIONS {
                             section(ui, menus, m, |ui, menus| match m {
-                                Menu::Channel(ch) => dialog_channel::show(ui, link, ch),
+                                Menu::Automotive => crate::ui::automotive_dock::show(ui, auto, link, rec, hist),
+                                Menu::Channel(ch) => dialog_channel::show(ui, link, ch, &mut auto.dsp[ch]),
                                 Menu::Horizontal => {
                                     dialog_horizontal::show(ui, link, phosphor, deep)
                                 }
@@ -267,6 +333,7 @@ pub fn show(
 /// Always-visible zoom/pan/home strip at the top of the dock — the same
 /// operations the plot gestures (`ui/touch.rs`) and the `zoom`/`pan`/`home`
 /// script actions drive.
+#[allow(dead_code)]
 fn view_toolbar(ui: &mut egui::Ui, link: &mut crate::Link, phosphor: &mut crate::gpu::Phosphor) {
     use crate::ui::icons::{Icon, button};
     ui.horizontal(|ui| {

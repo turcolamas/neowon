@@ -272,7 +272,7 @@ pub fn build(
             coverage = cov;
             breaks = trimmed.windows(2).filter(|w| w[1] != w[0] + 1).count()
                 + usize::from(!trimmed.is_empty());
-            gaps = trimmed;
+            gaps = if deep.collapse { Vec::new() } else { trimmed };
         }
         pairs[ch] = r.pairs;
     }

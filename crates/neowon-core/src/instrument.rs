@@ -226,6 +226,8 @@ pub struct ScopeConfig {
     pub position: f64,
     pub acq: AcqMode,
     pub running: bool,
+    /// Force continuous hardware streaming (roll mode), bypassing the FPGA trigger engine.
+    pub roll: bool,
 }
 
 impl Default for ScopeConfig {
@@ -246,6 +248,7 @@ impl Default for ScopeConfig {
             position: 0.5,
             acq: AcqMode::Sample,
             running: true,
+            roll: false,
         }
     }
 }
