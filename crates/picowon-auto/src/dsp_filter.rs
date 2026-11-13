@@ -90,17 +90,39 @@ pub const AUTOMOTIVE_LPF_PRESETS: [(f64, &str); 7] = [
     (500_000.0, "500 kHz (Alta Frecuencia)"),
 ];
 
-/// Common resolution enhancement presets (PicoScope style)
-pub const RES_ENHANCE_PRESETS: [(f32, &str); 8] = [
-    (0.0, "Off (8 bits nativo)"),
-    (0.5, "+0.5 bits (8.5 bits - n=2)"),
-    (1.0, "+1.0 bit (9.0 bits - n=4)"),
-    (1.5, "+1.5 bits (9.5 bits - n=8)"),
-    (2.0, "+2.0 bits (10.0 bits - n=16)"),
-    (2.5, "+2.5 bits (10.5 bits - n=32)"),
-    (3.0, "+3.0 bits (11.0 bits - n=64)"),
-    (4.0, "+4.0 bits (12.0 bits - n=256)"),
+/// Common resolution enhancement presets (PicoScope 7 Cap. 2.1: 8.5 to 12.0 bits in 0.5-bit steps)
+pub const RES_ENHANCE_PRESETS: [(f32, &str); 9] = [
+    (0.0, "Off (8.0 bits nativo)"),
+    (0.5, "+0.5 bits (8.5 bits · N=2)"),
+    (1.0, "+1.0 bit (9.0 bits · N=4)"),
+    (1.5, "+1.5 bits (9.5 bits · N=8)"),
+    (2.0, "+2.0 bits (10.0 bits · N=16)"),
+    (2.5, "+2.5 bits (10.5 bits · N=32)"),
+    (3.0, "+3.0 bits (11.0 bits · N=64)"),
+    (3.5, "+3.5 bits (11.5 bits · N=128)"),
+    (4.0, "+4.0 bits (12.0 bits · N=256)"),
 ];
+
+/// Calcula la frecuencia de corte efectiva aplicando protección dinámica de Nyquist (Cap. 2.1: máx 45% de Fs).
+/// Devuelve `(fc_efectiva_hz, fue_limitada_por_nyquist)`.
+pub fn effective_lpf_cutoff_hz(requested_hz: f64, sample_rate: f64) -> (f64, bool) {
+    let max_nyquist_safe = (sample_rate * 0.45).max(1.0);
+    if requested_hz > max_nyquist_safe {
+        (max_nyquist_safe, true)
+    } else {
+        (requested_hz.max(1.0), false)
+    }
+}
+
+/// Calcula el ancho de banda plano (-3 dB) resultante al activar Mejora de Resolución (Cap. 2.1):
+/// $f_{-3\text{dB}} \approx \frac{0.443 \cdot f_s}{4^{\text{bits}}}$.
+pub fn res_enhance_effective_bandwidth_hz(sample_rate: f64, bits: f32) -> Option<f64> {
+    if bits <= 0.0 || sample_rate <= 0.0 {
+        return None;
+    }
+    let n = 4.0_f64.powf(bits as f64).max(2.0);
+    Some((0.4429 * sample_rate) / n)
+}
 
 /// Applies non-destructive DSP signal conditioning to a slice of ADC counts.
 pub fn apply_channel_dsp(
@@ -138,11 +160,10 @@ pub fn apply_channel_dsp(
         }
     }
 
-    // 2. Filtro Pasa-Bajos con Algoritmo Seleccionado
+    // 2. Filtro Pasa-Bajos con Algoritmo Seleccionado y Protección Dinámica de Nyquist (< 0.45 * Fs)
     if config.lpf_enabled && config.lpf_cutoff_hz > 0.0 && sample_rate > 10.0 {
-        let nyquist = sample_rate * 0.5;
-        let fc = config.lpf_cutoff_hz.min(nyquist * 0.999);
-        if fc < nyquist && out.len() >= 4 {
+        let (fc, _) = effective_lpf_cutoff_hz(config.lpf_cutoff_hz, sample_rate);
+        if out.len() >= 4 {
             out = match config.filter_algorithm {
                 LpfAlgorithm::Gaussian => gaussian_low_pass(&out, sample_rate, fc),
                 LpfAlgorithm::SavitzkyGolay => savitzky_golay_filter(&out, sample_rate, fc),

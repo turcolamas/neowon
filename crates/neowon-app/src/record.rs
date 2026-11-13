@@ -19,10 +19,8 @@ pub const DEFAULT_BUDGET: usize = 2 << 30;
 
 
 /// Límite estricto del búfer circular de tramas en RAM (FIFO).
-
-/// Mantiene un historial ágil, manejable y ligero de hasta 50 tramas.
-
-pub const MAX_FRAMES_IN_RAM: usize = 50;
+/// Mantiene un historial ágil, manejable y profundo de hasta 128 tramas (Cap. 6.1 Waveform Buffer).
+pub const MAX_FRAMES_IN_RAM: usize = 128;
 
 /// Samples per tile in the min/max summaries. 64 costs ~3 % of a record's
 /// memory and lets a wide timeline window be drawn from summaries instead
@@ -67,9 +65,32 @@ impl Default for Recorder {
 /// History browser: while `active`, acquisition is stopped and the display
 /// shows `Recorder.frames[i]` — every consumer already follows
 /// `link.latest`, so scrubbing is just assigning it.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct History {
     pub active: Option<usize>,
+    /// Ventana flotante del Navegador Visual de Búfer de Formas de Onda (Cap. 6.1).
+    pub gallery_open: bool,
+    /// Filtra la galería y la navegación sólo a tramas que violaron la máscara Pasa/Falla.
+    pub filter_failed_only: bool,
+    /// Reproducción automática paso a paso de las tramas del búfer.
+    pub playing: bool,
+    /// Velocidad de reproducción (tramas por segundo).
+    pub play_fps: f32,
+    /// Marca de tiempo del último paso automático de reproducción.
+    pub last_step_time: f64,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            active: None,
+            gallery_open: false,
+            filter_failed_only: false,
+            playing: false,
+            play_fps: 4.0,
+            last_step_time: 0.0,
+        }
+    }
 }
 
 impl History {
@@ -89,6 +110,7 @@ impl History {
 
     pub fn live(&mut self, link: &mut Link) {
         self.active = None;
+        self.playing = false;
         if !link.config.running {
             link.config.running = true;
             link.dirty = true;

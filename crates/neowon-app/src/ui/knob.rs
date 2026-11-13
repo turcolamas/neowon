@@ -148,7 +148,7 @@ pub fn stepper_ladder(
             ui.label(egui::RichText::new(label).strong());
         }
         let can_down = idx > 0;
-        if ui.add_enabled(can_down, egui::Button::new("◀").min_size(egui::vec2(22.0, 20.0))).clicked() {
+        if ui.add_enabled(can_down, egui::Button::new("-").min_size(egui::vec2(22.0, 20.0))).clicked() {
             *value = ladder[idx - 1];
             changed = true;
         }
@@ -158,7 +158,7 @@ pub fn stepper_ladder(
             changed = true;
         }
         let can_up = idx + 1 < ladder.len();
-        if ui.add_enabled(can_up, egui::Button::new("▶").min_size(egui::vec2(22.0, 20.0))).clicked() {
+        if ui.add_enabled(can_up, egui::Button::new("+").min_size(egui::vec2(22.0, 20.0))).clicked() {
             *value = ladder[idx + 1];
             changed = true;
         }
@@ -181,7 +181,7 @@ pub fn stepper_value(
         if !label.is_empty() {
             ui.label(label);
         }
-        if ui.add(egui::Button::new("◀").min_size(egui::vec2(22.0, 20.0))).clicked() {
+        if ui.add(egui::Button::new("-").min_size(egui::vec2(22.0, 20.0))).clicked() {
             *value = (*value - step).clamp(range.0, range.1);
             changed = true;
         }
@@ -189,7 +189,7 @@ pub fn stepper_value(
             *value = default;
             changed = true;
         }
-        if ui.add(egui::Button::new("▶").min_size(egui::vec2(22.0, 20.0))).clicked() {
+        if ui.add(egui::Button::new("+").min_size(egui::vec2(22.0, 20.0))).clicked() {
             *value = (*value + step).clamp(range.0, range.1);
             changed = true;
         }

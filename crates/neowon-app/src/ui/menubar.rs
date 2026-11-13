@@ -11,7 +11,7 @@ use crate::derived::fmt_si;
 
 use super::layout::{Layout, Roi};
 use super::menu::MenuState;
-use super::widgets::{RUN_COLOR, STOP_COLOR, WAIT_COLOR};
+use super::widgets::{ButtonTone, pro_button_widget, RUN_COLOR, STOP_COLOR, WAIT_COLOR};
 
 pub fn run_state(link: &Link, now: f64) -> (&'static str, egui::Color32) {
     if !link.config.running {
@@ -44,8 +44,33 @@ pub fn show(
                 ui.add_space(8.0);
                 ui.spacing_mut().item_spacing.x = 6.0;
 
-                // 1. Menús superiores
+                // 0. Botón Principal del Hub de la Suite (F2)
+                let launcher_open = bar.auto.suite.launcher_open;
+                let suite_btn = pro_button_widget("🏠 SUITE", ButtonTone::Warning, launcher_open, 26.0)
+                    .min_size(egui::vec2(74.0, 26.0));
+                if ui
+                    .add(suite_btn)
+                    .on_hover_text("Abrir Hub Principal de PicoWon Automotive Suite (Atajo: F2)")
+                    .clicked()
+                {
+                    bar.auto.suite.launcher_open = !bar.auto.suite.launcher_open;
+                }
+
+                // 1. Menús superiores y Ficha del Vehículo
                 ui.menu_button("📁 Archivo", |ui| {
+                    if ui.button("🏠 Abrir Selector de Suite (F2)…").clicked() {
+                        bar.auto.suite.launcher_open = true;
+                        ui.close();
+                    }
+                    if ui.button("🚘 Ficha Técnica del Vehículo…").clicked() {
+                        bar.auto.suite.vehicle_dialog_open = true;
+                        ui.close();
+                    }
+                    if ui.button("🔌 Conectar Dispositivo / Modo Simulador Demo…").clicked() {
+                        bar.auto.suite.device_dialog_open = true;
+                        ui.close();
+                    }
+                    ui.separator();
                     let dir = crate::record::export_dir();
                     if ui.button("Guardar configuración (.nws)…").clicked() {
                         let p = dir.join("setup.nws");
@@ -70,93 +95,103 @@ pub fn show(
                     }
                 });
 
-                ui.menu_button("🚗 Automotriz", |ui| {
-                    if ui.button("📋 Abrir Panel Automotriz").clicked() {
-                        bar.menus.reveal(crate::ui::Menu::Automotive);
-                        ui.close();
+                // Botón de Ficha Técnica del Vehículo Activo (Cap. 10.2)
+                let veh_empty = bar.auto.suite.vehicle_store.active.is_empty();
+                let veh_label = if veh_empty {
+                    "🚘 Vehículo".to_string()
+                } else {
+                    let v = &bar.auto.suite.vehicle_store.active;
+                    let short = format!("{} {}", v.make.trim(), v.model.trim()).trim().to_string();
+                    if short.is_empty() {
+                        format!("🚘 {}", v.plate_or_vin.trim())
+                    } else {
+                        format!("🚘 {short}")
                     }
-                    ui.separator();
-                    ui.label(egui::RichText::new("Categorías de Prueba:").strong().color(egui::Color32::from_rgb(255, 170, 0)));
-                    for cat in [
-                        picowon_auto::PresetCategory::Ignition,
-                        picowon_auto::PresetCategory::Injection,
-                        picowon_auto::PresetCategory::Sensors,
-                        picowon_auto::PresetCategory::Actuators,
-                        picowon_auto::PresetCategory::Networks,
-                        picowon_auto::PresetCategory::StartingCharging,
-                    ] {
-                        ui.menu_button(cat.label(), |ui| {
-                            let presets = picowon_auto::get_all_presets();
-                            for p in presets.iter().filter(|p| p.category == cat) {
-                                if ui.button(p.name).on_hover_text(p.description).clicked() {
-                                    bar.menus.reveal(crate::ui::Menu::Automotive);
-                                    ui.close();
-                                }
-                            }
-                        });
-                    }
-                });
+                };
+                let veh_btn = pro_button_widget(
+                    veh_label,
+                    if veh_empty { ButtonTone::Neutral } else { ButtonTone::Success },
+                    false,
+                    26.0,
+                );
+                if ui
+                    .add(veh_btn)
+                    .on_hover_text(format!(
+                        "Ficha del Vehículo en Taller: {}\n(Clic para editar datos de vehículo, motor y orden de trabajo)",
+                        bar.auto.suite.vehicle_store.active.summary_badge()
+                    ))
+                    .clicked()
+                {
+                    bar.auto.suite.vehicle_dialog_open = true;
+                }
 
-                // Ayuda siempre visible en el extremo izquierdo con margen garantizado
-                let help_btn = egui::Button::new(
-                    egui::RichText::new("❓ Ayuda (F1)").size(11.0).strong().color(egui::Color32::from_rgb(110, 205, 255)),
-                )
-                .fill(egui::Color32::from_rgb(26, 34, 46))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(55, 85, 125)))
-                .min_size(egui::vec2(0.0, 24.0));
+                // Ayuda siempre visible con margen garantizado
+                let help_btn = pro_button_widget("❓ F1", ButtonTone::Neutral, bar.auto.help_window_open, 26.0);
                 if ui.add(help_btn).on_hover_text("Guía rápida de navegación con ratón y atajos de teclado (F1)").clicked() {
                     bar.auto.help_window_open = !bar.auto.help_window_open;
                 }
 
-                ui.separator();
-
-                // 2. Cinta de Selección de Modos de la Suite PicoWon
-                for mode in crate::ui::automotive_dock::AppMode::ALL {
-                    let active = bar.auto.app_mode == mode;
-                    let btn = egui::Button::new(
-                        egui::RichText::new(mode.title())
-                            .size(11.0)
-                            .strong()
-                            .color(if active { egui::Color32::BLACK } else { egui::Color32::from_rgb(220, 225, 235) }),
+                // Selector en caliente de Dispositivo USB / Simulador Demo (Cap. 1.7 Connect Device)
+                let (dev_lbl, dev_tone) = if link.is_sim_mode() {
+                    (
+                        format!("🧪 DEMO ({})", link.stimulus),
+                        ButtonTone::Primary,
                     )
-                    .fill(if active {
-                        egui::Color32::from_rgb(255, 180, 40)
-                    } else {
-                        egui::Color32::from_rgb(32, 38, 50)
-                    })
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        if active {
-                            egui::Color32::from_rgb(255, 210, 80)
-                        } else {
-                            egui::Color32::from_rgb(52, 60, 78)
-                        },
+                } else if link.caps.is_some() {
+                    (
+                        "🔌 USB VDS1022".to_string(),
+                        ButtonTone::Success,
+                    )
+                } else {
+                    (
+                        "🔌 Sin USB (Clic Demo)".to_string(),
+                        ButtonTone::Warning,
+                    )
+                };
+                let dev_btn = pro_button_widget(dev_lbl, dev_tone, false, 26.0);
+                if ui
+                    .add(dev_btn)
+                    .on_hover_text(format!(
+                        "Estado del Dispositivo: {}\nClic para conmutar en vivo entre Hardware USB OWON VDS1022 y Simulador Demo Automotriz sin reiniciar (Cap. 1.7)",
+                        link.status
                     ))
-                    .min_size(egui::vec2(0.0, 24.0));
-
-                    if ui.add(btn).clicked() {
-                        bar.auto.switch_app_mode(mode, link);
-                        bar.auto.strip_chart_view_active = mode == crate::ui::automotive_dock::AppMode::Datalogger;
-                        if mode == crate::ui::automotive_dock::AppMode::CanLinWaveform {
-                            bar.menus.open(crate::ui::Menu::Decode);
-                        }
-                    }
+                    .clicked()
+                {
+                    bar.auto.suite.device_dialog_open = !bar.auto.suite.device_dialog_open;
                 }
 
                 ui.separator();
 
-                // 3. RUN / STOP estilo PicoScope 7 (botón grande prominente)
+                // 2. Identidad de la Estación Activa (Cada Estación se presenta como su propio Software dedicado)
+                let ws = bar.auto.suite.active_workstation;
+                let accent = ws.accent_color();
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(22, 26, 36))
+                    .stroke(egui::Stroke::new(1.5, accent))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(10, 4))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(ws.card_title())
+                                .size(11.0)
+                                .strong()
+                                .color(accent),
+                        );
+                    });
+
+                ui.separator();
+
+                // 3. RUN / STOP (Motor común de adquisición en tiempo real)
                 let running = link.config.running;
-                let (r_label, r_bg) = if !running {
-                    ("⏹ STOP", egui::Color32::from_rgb(205, 40, 40))
+                let (r_label, r_tone) = if !running {
+                    ("⏹ STOP", ButtonTone::Danger)
                 } else if matches!(link.config.trigger.sweep, Sweep::Normal | Sweep::Single) && now - link.last_frame_at > 0.5 {
-                    ("⏳ WAIT", egui::Color32::from_rgb(230, 115, 0))
+                    ("⏳ WAIT", ButtonTone::Warning)
                 } else {
-                    ("▶ RUN", egui::Color32::from_rgb(46, 125, 50))
+                    ("▶ RUN", ButtonTone::Success)
                 };
-                let r_btn = egui::Button::new(egui::RichText::new(r_label).strong().color(egui::Color32::WHITE))
-                    .fill(r_bg)
-                    .min_size(egui::vec2(68.0, 24.0));
+                let r_btn = pro_button_widget(r_label, r_tone, true, 26.0)
+                    .min_size(egui::vec2(72.0, 26.0));
                 if ui.add(r_btn).on_hover_text("Conmutar RUN / STOP (Espacio)").clicked() {
                     link.config.running = !running;
                     link.dirty = true;
@@ -164,37 +199,134 @@ pub fn show(
 
                 ui.separator();
 
-                // 4. AutoSetup
-                if ui.button(egui::RichText::new("⚡ AutoSetup").strong().color(egui::Color32::from_rgb(255, 200, 50))).clicked() {
-                    let _ = link.sup.commands.send(neowon_backend::Command::AutoSet);
-                }
+                // 4. Barra de herramientas exclusiva de la Estación activa (sin rastros de otras estaciones)
+                match ws {
+                    crate::ui::suite::SuiteWorkstation::ScopeDatalogger => {
+                        let is_dl = bar.auto.strip_chart_view_active;
+                        for (lbl, dl_mode) in [("📊 Vista Osciloscopio", false), ("📈 Vista Datalogger", true)] {
+                            let sel = is_dl == dl_mode;
+                            let b = pro_button_widget(lbl, ButtonTone::Warning, sel, 26.0);
+                            if ui.add(b).clicked() {
+                                bar.auto.strip_chart_view_active = dl_mode;
+                                bar.auto.app_mode = if dl_mode {
+                                    crate::ui::automotive_dock::AppMode::Datalogger
+                                } else {
+                                    crate::ui::automotive_dock::AppMode::Oscilloscope
+                                };
+                            }
+                        }
 
-                // 5. Detección de Glitches / Peak Detect (Estilo PicoScope Glitch Catching)
-                let is_peak = link.config.acq == AcqMode::Peak;
-                let glitch_btn = egui::Button::new(
-                    egui::RichText::new(if is_peak { "⚡ Glitch: ON" } else { "⚡ Glitch: OFF" })
-                        .size(11.0)
-                        .strong()
-                        .color(if is_peak { egui::Color32::from_rgb(255, 230, 80) } else { egui::Color32::from_rgb(170, 180, 195) }),
-                )
-                .fill(if is_peak { egui::Color32::from_rgb(70, 50, 15) } else { egui::Color32::from_rgb(26, 30, 38) })
-                .stroke(egui::Stroke::new(1.0, if is_peak { egui::Color32::from_rgb(240, 180, 40) } else { egui::Color32::from_rgb(45, 55, 70) }));
+                        if !is_dl {
+                            ui.separator();
+                            let autoset_btn = pro_button_widget("⚡ AutoSetup", ButtonTone::Warning, false, 26.0);
+                            if ui.add(autoset_btn).on_hover_text("Configuración automática de escalas y disparo (AutoSetup)").clicked() {
+                                let _ = link.sup.commands.send(neowon_backend::Command::AutoSet);
+                            }
 
-                if ui.add(glitch_btn).on_hover_text("Detección de Glitches / Transitorios Rápidos (Peak Detect)\nMantiene pulsos y espigas sub-microsegundo incluso en bases de tiempo lentas").clicked() {
-                    link.config.acq = if is_peak { AcqMode::Sample } else { AcqMode::Peak };
-                    link.dirty = true;
-                }
+                            let is_peak = link.config.acq == AcqMode::Peak;
+                            let glitch_btn = pro_button_widget(
+                                if is_peak { "⚡ Glitch: ON" } else { "⚡ Glitch: OFF" },
+                                if is_peak { ButtonTone::Warning } else { ButtonTone::Neutral },
+                                is_peak,
+                                26.0,
+                            );
+                            if ui.add(glitch_btn).on_hover_text("Detección de Glitches / Transitorios Rápidos (Peak Detect)").clicked() {
+                                link.config.acq = if is_peak { AcqMode::Sample } else { AcqMode::Peak };
+                                link.dirty = true;
+                            }
 
-                // 6. Botón rápido para ventana de Zoom estilo PicoScope 7
-                let z_open = bar.auto.zoom_window_open;
-                let z_btn = egui::Button::new(
-                    egui::RichText::new("🔍 Zoom")
-                        .size(11.0)
-                        .color(if z_open { egui::Color32::from_rgb(255, 215, 60) } else { egui::Color32::WHITE })
-                )
-                .fill(if z_open { egui::Color32::from_rgb(45, 52, 68) } else { egui::Color32::from_rgb(26, 30, 38) });
-                if ui.add(z_btn).on_hover_text("Mostrar u ocultar ventana flotante de Zoom").clicked() {
-                    bar.auto.zoom_window_open = !bar.auto.zoom_window_open;
+                            let z_open = bar.auto.zoom_window_open;
+                            let z_btn = pro_button_widget("🔍 Zoom", ButtonTone::Primary, z_open, 26.0);
+                            if ui.add(z_btn).on_hover_text("Mostrar u ocultar ventana flotante de Zoom").clicked() {
+                                bar.auto.zoom_window_open = !bar.auto.zoom_window_open;
+                            }
+
+                            let fft_on = bar.fft.enabled;
+                            let fft_btn = pro_button_widget("📉 Espectro FFT", ButtonTone::Primary, fft_on, 26.0);
+                            if ui.add(fft_btn).on_hover_text("Activar o desactivar analizador de espectro FFT").clicked() {
+                                bar.fft.enabled = !bar.fft.enabled;
+                            }
+                        }
+                    }
+                    crate::ui::suite::SuiteWorkstation::ViTracer => {
+                        let b1 = pro_button_widget("📌 Fijar Golden Sample", ButtonTone::Warning, false, 26.0);
+                        if ui.add(b1).clicked() {
+                            bar.auto.vi_tracer.capture_reference();
+                        }
+                        let b2 = pro_button_widget("🗑 Borrar Golden", ButtonTone::Danger, false, 26.0);
+                        if ui.add(b2).clicked() {
+                            bar.auto.vi_tracer.clear_reference();
+                        }
+                        let b3 = pro_button_widget("💾 Guardar Curva V-I", ButtonTone::Primary, false, 26.0);
+                        if ui.add(b3).clicked() {
+                            bar.auto.vi_capture.is_save_dialog_open = true;
+                        }
+                        let b4 = pro_button_widget("🗄 Biblioteca Firmas V-I", ButtonTone::Neutral, bar.auto.vi_capture.is_load_db_dialog_open, 26.0);
+                        if ui.add(b4).clicked() {
+                            bar.auto.vi_capture.is_load_db_dialog_open = !bar.auto.vi_capture.is_load_db_dialog_open;
+                        }
+                    }
+                    crate::ui::suite::SuiteWorkstation::CommsMonitor => {
+                        for (lbl, lay) in [
+                            ("🔀 Vista Combinada", crate::ui::suite::CommsViewLayout::CombinedSplit),
+                            ("📈 Solo Onda Física", crate::ui::suite::CommsViewLayout::PhysicalWaveformOnly),
+                            ("🌐 Tabla Tráfico CAN/LIN", crate::ui::suite::CommsViewLayout::TrafficTableOnly),
+                        ] {
+                            let sel = bar.auto.suite.comms_layout == lay;
+                            let b = pro_button_widget(lbl, ButtonTone::Success, sel, 26.0);
+                            if ui.add(b).clicked() {
+                                bar.auto.suite.comms_layout = lay;
+                            }
+                        }
+                        ui.separator();
+                        let send_btn = pro_button_widget("🔬 Enviar a Osciloscopio", ButtonTone::Warning, false, 26.0);
+                        if ui.add(send_btn).clicked() {
+                            crate::ui::suite::transfer_capture_to_scope_workstation(bar.auto, link, bar.math);
+                        }
+                    }
+                    crate::ui::suite::SuiteWorkstation::ActuatorsLoop => {
+                        let is_split = bar.auto.suite.actuator_layout
+                            == crate::ui::suite::ActuatorViewLayout::SplitCurveAndWaveforms;
+                        for (lbl, lay) in [
+                            ("🔀 Ondas + Curva X-Y", crate::ui::suite::ActuatorViewLayout::SplitCurveAndWaveforms),
+                            ("🎯 Solo Curva X-Y", crate::ui::suite::ActuatorViewLayout::TransferCurveXy),
+                        ] {
+                            let sel = (lay == crate::ui::suite::ActuatorViewLayout::SplitCurveAndWaveforms) == is_split;
+                            let b = pro_button_widget(lbl, ButtonTone::Custom(accent), sel, 26.0);
+                            if ui.add(b).clicked() {
+                                bar.auto.suite.actuator_layout = lay;
+                            }
+                        }
+                        let clr_btn = pro_button_widget("🗑 Limpiar Curva", ButtonTone::Danger, false, 26.0);
+                        if ui.add(clr_btn).clicked() {
+                            bar.auto.actuator.clear();
+                        }
+                        ui.separator();
+                        let send_btn = pro_button_widget("🔬 Enviar a Osciloscopio", ButtonTone::Warning, false, 26.0);
+                        if ui.add(send_btn).clicked() {
+                            crate::ui::suite::transfer_capture_to_scope_workstation(bar.auto, link, bar.math);
+                        }
+                    }
+                    crate::ui::suite::SuiteWorkstation::AutomotiveTests => {
+                        let guide_btn = pro_button_widget("📋 Panel Guía y Conexión", ButtonTone::Primary, bar.menus.is_open(crate::ui::Menu::Automotive), 26.0);
+                        if ui.add(guide_btn).clicked() {
+                            bar.menus.toggle(crate::ui::Menu::Automotive);
+                        }
+                        let r720 = bar.auto.ruler.enabled;
+                        let r_btn = pro_button_widget("📐 Regla 720° 4-Tiempos", ButtonTone::Warning, r720, 26.0);
+                        if ui.add(r_btn).clicked() {
+                            bar.auto.ruler.enabled = !bar.auto.ruler.enabled;
+                        }
+                        let autoset_btn = pro_button_widget("⚡ AutoSetup", ButtonTone::Warning, false, 26.0);
+                        if ui.add(autoset_btn).clicked() {
+                            let _ = link.sup.commands.send(neowon_backend::Command::AutoSet);
+                        }
+                        ui.separator();
+                        let send_btn = pro_button_widget("🔬 Enviar a Osciloscopio", ButtonTone::Warning, false, 26.0);
+                        if ui.add(send_btn).clicked() {
+                            crate::ui::suite::transfer_capture_to_scope_workstation(bar.auto, link, bar.math);
+                        }
+                    }
                 }
             });
         });
@@ -320,6 +452,7 @@ pub struct BarState<'a> {
     pub settings: &'a mut crate::ui::settings::Settings,
     pub script: &'a mut crate::script::Script,
     pub menus: &'a mut MenuState,
+    pub math: &'a mut crate::derived::MathState,
     pub fft: &'a mut crate::derived::FftState,
     pub wf: &'a mut crate::viz::waterfall::WaterfallState,
     pub viz: &'a mut crate::viz::three_d::Viz3dState,

@@ -297,6 +297,7 @@ fn armed_backend(stim: &str, level: f64, sweep: Sweep) -> SimBackend {
             level,
             sweep,
             holdoff: 100e-9,
+            ..Default::default()
         },
         position: 0.5,
         ..Default::default()

@@ -23,6 +23,7 @@ pub mod layout;
 pub mod measure_window;
 pub mod menu;
 pub mod menubar;
+pub mod plot_tools;
 pub mod sdr_bands;
 pub mod sdr_dock;
 pub mod sdr_iq;
@@ -32,6 +33,7 @@ pub mod sdr_view;
 pub mod settings;
 pub mod station_overlay;
 pub mod stations_window;
+pub mod suite;
 pub mod touch;
 pub mod viz_windows;
 pub mod widgets;
@@ -107,6 +109,7 @@ pub fn panel(
         settings: &mut viz.8,
         script: &mut script,
         menus: &mut menus,
+        math: &mut math,
         fft: &mut fft,
         wf: &mut viz.0,
         viz: &mut viz.1,
@@ -121,7 +124,7 @@ pub fn panel(
     // In SDR mode the SDR view and dock take the descriptor bar's and the
     // dock's places (drawn underneath windows, so Settings stays reachable).
     let sdr_mode = false; // SDR deshabilitado para PicoWon Automotive
-    if !sdr_mode {
+    if !sdr_mode && viz.11.suite.active_workstation != suite::SuiteWorkstation::ViTracer {
         let (desc, overlay) =
             descriptors::show(
                 &ctx,
@@ -152,7 +155,7 @@ pub fn panel(
         )
     };
     rects.put("front_panel", r);
-    if !sdr_mode {
+    if !sdr_mode && viz.11.suite.active_workstation != suite::SuiteWorkstation::ViTracer {
         let r = menu::show(
             &ctx,
             &layout,
@@ -185,33 +188,90 @@ pub fn panel(
         phosphor.deep = None;
     }
 
-    // Detección tecla F1 para ayuda
+    // Detección tecla F1 para ayuda y F2 para Hub de la Suite
     if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
         viz.11.help_window_open = !viz.11.help_window_open;
     }
-    // Overlays Automotrices y Vistas Especializadas de la Suite
-    if viz.11.app_mode == automotive_dock::AppMode::ViCurveTracer {
-        // Modo Trazador VI: opera de forma completamente aislada de los demás módulos
-        automotive_dock::show_vi_tracer_view(&ctx, &layout, &mut link, &mut viz.11);
-    } else {
-        automotive_dock::show_zoom_window(&ctx, &layout, &link, &mut phosphor, &mut viz.11);
-        automotive_dock::draw_crank_overlay(&ctx, &layout, &link, &mut viz.11);
-        automotive_dock::show_strip_chart_view(&ctx, &layout, &mut link, &mut viz.11, &meas, now);
-        automotive_dock::show_actuator_analysis_view(&ctx, &layout, &link, &mut viz.11, now);
-        automotive_dock::show_bus_traffic_view(&ctx, &layout, &mut viz.11, &viz.7);
-        automotive_dock::show_can_diff_hud(&ctx, &layout, &mut link, &mut math, &mut viz.11);
+    if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
+        viz.11.suite.launcher_open = !viz.11.suite.launcher_open;
     }
+
+    // Despacho de las 5 Estaciones de Trabajo Independientes de la Suite PicoWon
+    match viz.11.suite.active_workstation {
+        suite::SuiteWorkstation::ViTracer => {
+            // Estación 2: Trazador de Curvas V-I (1:1 X-Y aislado)
+            automotive_dock::show_vi_tracer_view(&ctx, &layout, &mut link, &mut viz.11);
+        }
+        suite::SuiteWorkstation::ScopeDatalogger => {
+            // Estación 1: Osciloscopio + Datalogger Strip-Chart
+            automotive_dock::show_zoom_window(&ctx, &layout, &link, &mut phosphor, &mut viz.11);
+            automotive_dock::draw_crank_overlay(&ctx, &layout, &link, &mut viz.11);
+            automotive_dock::show_strip_chart_view(&ctx, &layout, &mut link, &mut viz.11, &meas, now);
+        }
+        suite::SuiteWorkstation::CommsMonitor => {
+            // Estación 3: Comunicaciones y Monitor de Tráfico CAN / LIN / Serial
+            automotive_dock::show_zoom_window(&ctx, &layout, &link, &mut phosphor, &mut viz.11);
+            suite::show_comms_workstation_overlay(&ctx, &layout, &mut link, &mut math, &mut viz.11, &viz.7);
+        }
+        suite::SuiteWorkstation::ActuatorsLoop => {
+            // Estación 4: Actuadores y Sensores en Lazo Cerrado
+            automotive_dock::show_zoom_window(&ctx, &layout, &link, &mut phosphor, &mut viz.11);
+            automotive_dock::show_actuator_analysis_view(&ctx, &layout, &link, &mut viz.11, now);
+        }
+        suite::SuiteWorkstation::AutomotiveTests => {
+            // Estación 5: Testeos Automotrices Guiados
+            automotive_dock::show_zoom_window(&ctx, &layout, &link, &mut phosphor, &mut viz.11);
+            automotive_dock::draw_crank_overlay(&ctx, &layout, &link, &mut viz.11);
+            suite::show_guided_tests_top_banner(&ctx, &layout, &mut link, &mut math, &mut menus, &mut viz.11);
+        }
+    }
+
     automotive_dock::show_help_window(&ctx, &mut viz.11);
     automotive_dock::show_scope_capture_dialog(&ctx, &mut link, &mut rec, &mut script, &mut viz.11);
     automotive_dock::show_datalogger_session_dialogs(&ctx, &mut link, &mut viz.11, now);
     automotive_dock::show_vi_capture_and_db_dialogs(&ctx, &mut link, &mut viz.11);
     automotive_dock::show_capture_browser_dialog(&ctx, &mut link, &mut rec, &mut viz.11, now);
     automotive_dock::show_active_capture_banner(&ctx, &layout, &mut link, &mut viz.11);
+    if viz.11.suite.pending_gallery_toggle {
+        viz.11.suite.pending_gallery_toggle = false;
+        hist.gallery_open = !hist.gallery_open;
+    }
+    dialog_record::show_buffer_gallery_window(&ctx, &mut link, &rec, &mut hist, &pf, now);
+    suite::show_vehicle_details_dialog(&ctx, &mut viz.11);
+    suite::show_connect_device_dialog(&ctx, &mut link, &mut viz.11);
+    suite::show_suite_launcher_modal(&ctx, &mut link, &mut math, &mut menus, &mut viz.8, &mut viz.11);
+    suite::sync_window_title(&ctx, &mut viz.11);
     crate::refs::overlay(&ctx, &layout, &refs);
 
-    measure_window::show(&ctx, &mut meas);
-    dialog_decode::show_decode_table(&ctx, &mut viz.7);
-    if fft.enabled {
+    // Ventanas flotantes restringidas estrictamente a su Estación de Trabajo correspondiente
+    if viz.11.suite.active_workstation != suite::SuiteWorkstation::ViTracer {
+        measure_window::show(&ctx, &mut meas);
+        dialog_cursor::show_rulers_floating_overlay(
+            &ctx,
+            &layout,
+            &link,
+            &phosphor,
+            &mut cur,
+            &meas,
+            &viz.6,
+            &viz.11,
+        );
+        plot_tools::show_plot_overlays(
+            &ctx,
+            &layout,
+            &mut link,
+            &mut phosphor,
+            &meas,
+            &viz.6,
+            &mut viz.11,
+            &cur,
+            now,
+        );
+    }
+    if viz.11.suite.active_workstation == suite::SuiteWorkstation::CommsMonitor {
+        dialog_decode::show_decode_table(&ctx, &mut viz.7, &mut viz.11.traffic);
+    }
+    if fft.enabled && viz.11.suite.active_workstation == suite::SuiteWorkstation::ScopeDatalogger {
         spectrum_window(&ctx, &mut fft);
     }
     if viz.0.on {

@@ -47,6 +47,12 @@ pub fn show(
                 }
             }
         });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut phosphor.split_grid, "Split-Grid CH1/CH2");
+            if phosphor.mode == TraceMode::Xy {
+                ui.checkbox(&mut phosphor.xy_square, "XY 1:1");
+            }
+        });
         ui.add(egui::Slider::new(&mut phosphor.gain, 0.05..=3.0).text("Intensity"));
         ui.checkbox(&mut phosphor.crt, "CRT screen (halo, scanlines)");
         ui.checkbox(&mut cur.markers, "On-graph handles (trigger, offsets)");
@@ -131,6 +137,22 @@ pub fn show(
         });
         if refs.traces.iter().all(Option::is_none) {
             ui.label(egui::RichText::new("no reference saved").weak().small());
+        }
+        for ch in 0..2 {
+            if refs.traces[ch].is_some() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Ref CH{} delay", ch + 1));
+                    ui.add(
+                        egui::DragValue::new(&mut refs.delay_div[ch])
+                            .speed(0.05)
+                            .range(-10.0..=10.0)
+                            .suffix(" div"),
+                    );
+                    if ui.small_button("0").on_hover_text("Sin retardo").clicked() {
+                        refs.delay_div[ch] = 0.0;
+                    }
+                });
+            }
         }
     });
 

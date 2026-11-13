@@ -111,22 +111,22 @@ impl Layout {
             Pos2::new(left_w, win_h),
         );
 
-        // Cajón derecho para submenús detallados (ocupa todo el lateral derecho, o 0 px si colapsado)
+        // Columna secundaria adyacente a la derecha de la columna principal izquierda (Estilo PicoScope 7)
         let dialog = Rect::from_min_max(
-            Pos2::new(win_w - dialog_w, mid_top),
-            Pos2::new(win_w, win_h),
+            Pos2::new(left_w, mid_top),
+            Pos2::new(left_w + dialog_w, win_h),
         );
 
         // Barra inferior de mediciones automotrices en vivo
         let descriptors = Rect::from_min_max(
-            Pos2::new(left_w + margin, win_h - desc_h - margin),
-            Pos2::new(win_w - dialog_w - margin, win_h - margin),
+            Pos2::new(left_w + dialog_w + margin, win_h - desc_h - margin),
+            Pos2::new(win_w - margin, win_h - margin),
         );
 
-        // Cuadrícula del osciloscopio: entre el riel izquierdo y el cajón derecho (se expande a 100% si colapsado)
+        // Cuadrícula del osciloscopio: desde el borde derecho de la columna adyacente hasta el final de la ventana
         let plot = Rect::from_min_max(
-            Pos2::new(left_w + margin, mid_top + margin),
-            Pos2::new(win_w - dialog_w - margin, descriptors.top() - desc_gap),
+            Pos2::new(left_w + dialog_w + margin, mid_top + margin),
+            Pos2::new(win_w - margin, descriptors.top() - desc_gap),
         );
 
         let ribbon = Rect::from_min_max(
@@ -332,9 +332,9 @@ mod tests {
             assert!((l.descriptors.top() - plot.bottom() - DESC_GAP * s).abs() < 1e-3);
             assert_eq!(l.descriptors.width(), plot.width());
             assert_eq!(l.descriptors.left(), plot.left());
-            assert!(l.dialog.left() >= plot.right());
+            assert_eq!(l.dialog.left(), l.front_panel.right());
             assert!((l.dialog.width() - DIALOG_W * s).abs() < 1e-3);
-            assert_eq!(l.dialog.right(), w);
+            assert!(plot.left() >= l.dialog.right());
             assert_eq!(l.menu_bar.width(), w);
             assert_eq!(l.dialog.bottom(), h);
             assert!((l.front_panel.width() - LEFT_RAIL_W * s).abs() < 1e-3);

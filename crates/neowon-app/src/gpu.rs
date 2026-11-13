@@ -103,6 +103,10 @@ pub struct Phosphor {
     pub deep: Option<std::sync::Arc<DeepFrame>>,
     /// Deltas de offset software por canal para modo STOP / inspección
     pub delta_offsets: [f32; 2],
+    /// Divide la grilla verticalmente en CH1 superior y CH2 inferior.
+    pub split_grid: bool,
+    /// En modo XY ajusta relación de aspecto 1:1 (cuadrada) en el centro.
+    pub xy_square: bool,
 }
 
 /// A timeline reduced for display: min/max pairs per column per channel,
@@ -137,6 +141,8 @@ impl Default for Phosphor {
             zoom_on: false,
             deep: None,
             delta_offsets: [0.0, 0.0],
+            split_grid: false,
+            xy_square: true,
         }
     }
 }
@@ -189,6 +195,8 @@ struct Params {
     col0: Vec4,
     col1: Vec4,
     col2: Vec4,
+    split_grid: u32,
+    xy_square: u32,
 }
 
 #[derive(Resource)]
@@ -215,6 +223,9 @@ pub(crate) struct Buffers {
     /// Last applied zoom window — a change clears the phosphor.
     hview: (f64, f64),
     offsets: [f32; 2],
+    mode: TraceMode,
+    split_grid: bool,
+    xy_square: bool,
 }
 
 #[derive(Resource)]
@@ -289,6 +300,9 @@ fn prepare_buffers(
                 do_raster: false,
                 hview: phosphor.hview,
                 offsets: [0.0, 0.0],
+                mode: phosphor.mode,
+                split_grid: phosphor.split_grid,
+                xy_square: phosphor.xy_square,
             });
             return; // bind next frame
         }
@@ -378,6 +392,16 @@ fn prepare_buffers(
         b.offsets = phosphor.delta_offsets;
         b.do_raster = true;
     }
+    if phosphor.mode != b.mode
+        || phosphor.split_grid != b.split_grid
+        || phosphor.xy_square != b.xy_square
+    {
+        decay = 0.0;
+        b.mode = phosphor.mode;
+        b.split_grid = phosphor.split_grid;
+        b.xy_square = phosphor.xy_square;
+        b.do_raster = true;
+    }
     let (center, span) = phosphor.hview;
     let span = span.clamp(0.01, 1.0);
     let center = center.clamp(span / 2.0, 1.0 - span / 2.0);
@@ -410,6 +434,8 @@ fn prepare_buffers(
         col0: Vec4::new(1.0, 0.85, 0.1, 1.0),
         col1: Vec4::new(0.2, 0.75, 1.0, 1.0),
         col2: Vec4::new(1.0, 0.35, 0.85, 1.0),
+        split_grid: phosphor.split_grid as u32,
+        xy_square: phosphor.xy_square as u32,
     });
     b.params.write_buffer(&device, &queue);
 }

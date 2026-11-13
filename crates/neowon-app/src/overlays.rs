@@ -3,14 +3,18 @@
 
 use bevy::prelude::*;
 
-use crate::gpu::Phosphor;
+use crate::gpu::{Phosphor, TraceMode};
 // Screen geometry follows the reference scope: 10 horizontal x 8 vertical
 // divisions (docs/ui-ux-research.md §6), computed at runtime from the window
 // size (`ui::layout::Layout`).
 use crate::ui::layout::{H_DIVS, Layout, V_DIVS};
 use crate::{Link, cursors, derived, ui, view};
 
-pub(crate) fn draw_graticule(layout: Res<Layout>, mut gizmos: Gizmos) {
+pub(crate) fn draw_graticule(
+    layout: Res<Layout>,
+    phosphor: Res<Phosphor>,
+    mut gizmos: Gizmos,
+) {
     let w = layout.plot.width();
     let h = layout.plot.height();
     let o = layout.plot_center;
@@ -103,9 +107,41 @@ pub(crate) fn draw_graticule(layout: Res<Layout>, mut gizmos: Gizmos) {
             gizmos.line_2d(Vec2::new(cx, cy - arm), Vec2::new(cx, cy + arm), tick_color);
         }
     }
+
+    // 9. Indicadores Split-Grid CH1/CH2 (mitad superior CH1, mitad inferior CH2)
+    if phosphor.split_grid && phosphor.mode != TraceMode::Xy {
+        let sep_col = Color::srgba(0.65, 0.78, 0.92, 0.78);
+        gizmos.line_2d(Vec2::new(x_left, o.y), Vec2::new(x_right, o.y), sep_col);
+        let y_ch1 = o.y + h * 0.25;
+        let y_ch2 = o.y - h * 0.25;
+        let c1 = Color::srgba(1.0, 0.85, 0.1, 0.32);
+        let c2 = Color::srgba(0.2, 0.75, 1.0, 0.32);
+        let mut x = x_left;
+        while x < x_right {
+            let x2 = (x + 6.0).min(x_right);
+            gizmos.line_2d(Vec2::new(x, y_ch1), Vec2::new(x2, y_ch1), c1);
+            gizmos.line_2d(Vec2::new(x, y_ch2), Vec2::new(x2, y_ch2), c2);
+            x += 12.0;
+        }
+    }
+
+    // 10. Marco 1:1 cuadrado centrado para Vista XY 1:1 (10x10 div)
+    if phosphor.mode == TraceMode::Xy && phosphor.xy_square {
+        let half = h * 0.5;
+        let sq_col = Color::srgba(0.32, 0.76, 0.96, 0.65);
+        gizmos.line_2d(Vec2::new(o.x - half, o.y - half), Vec2::new(o.x + half, o.y - half), sq_col);
+        gizmos.line_2d(Vec2::new(o.x - half, o.y + half), Vec2::new(o.x + half, o.y + half), sq_col);
+        gizmos.line_2d(Vec2::new(o.x - half, o.y - half), Vec2::new(o.x - half, o.y + half), sq_col);
+        gizmos.line_2d(Vec2::new(o.x + half, o.y - half), Vec2::new(o.x + half, o.y + half), sq_col);
+    }
 }
 
-pub(crate) fn draw_trigger(link: Res<Link>, layout: Res<Layout>, mut gizmos: Gizmos) {
+pub(crate) fn draw_trigger(
+    link: Res<Link>,
+    layout: Res<Layout>,
+    auto: Option<Res<ui::automotive_dock::AutomotiveUiState>>,
+    mut gizmos: Gizmos,
+) {
     let w = layout.plot.width();
     let o = layout.plot_center;
     let src = link
@@ -114,15 +150,56 @@ pub(crate) fn draw_trigger(link: Res<Link>, layout: Res<Layout>, mut gizmos: Giz
         .source
         .min(link.config.channels.len() - 1);
     let ch = &link.config.channels[src];
-    let range = ch.volts_div * 10.0 * ch.probe;
+    let range = (ch.volts_div * 10.0 * ch.probe).max(1e-9);
     // Fraction of full (10 div) range; the display window is +-4 div.
     let frac = (link.config.trigger.level / range + ch.offset).clamp(-0.49, 0.49);
     let y = layout.frac_to_world_y(frac as f32);
     gizmos.line_2d(
         Vec2::new(o.x - w / 2.0, y),
         Vec2::new(o.x + w / 2.0, y),
-        Color::srgba(1.0, 0.5, 0.2, 0.5),
+        Color::srgba(1.0, 0.5, 0.2, 0.55),
     );
+
+    // Banda de armado por histéresis programable de la FPGA (Cap. 4.11)
+    let hyst_frac = (link.config.trigger.hysteresis_pct as f64 / 100.0).clamp(0.005, 0.20);
+    let arm_frac = match link.config.trigger.kind {
+        neowon_core::TriggerKind::Edge {
+            slope: neowon_core::Slope::Falling,
+        } => (frac + hyst_frac).clamp(-0.49, 0.49),
+        _ => (frac - hyst_frac).clamp(-0.49, 0.49),
+    };
+    let y_arm = layout.frac_to_world_y(arm_frac as f32);
+    let arm_col = Color::srgba(1.0, 0.65, 0.25, 0.28);
+    let mut x = o.x - w / 2.0;
+    while x < o.x + w / 2.0 {
+        let x2 = (x + 5.0).min(o.x + w / 2.0);
+        gizmos.line_2d(Vec2::new(x, y_arm), Vec2::new(x2, y_arm), arm_col);
+        x += 10.0;
+    }
+
+    // Umbrales duales cuando el Calificador de Ventana o Pulso Runt está activo (Cap. 4.3 / 4.6)
+    if let Some(a) = auto.as_ref() {
+        let dual_bounds = match a.trigger_qualifier.mode {
+            picowon_auto::AdvancedTriggerMode::Window => Some((
+                a.trigger_qualifier.window_lower_v,
+                a.trigger_qualifier.window_upper_v,
+                Color::srgba(0.35, 0.85, 1.0, 0.45),
+            )),
+            picowon_auto::AdvancedTriggerMode::RuntPulse => Some((
+                a.trigger_qualifier.runt_low_v,
+                a.trigger_qualifier.runt_high_v,
+                Color::srgba(1.0, 0.35, 0.75, 0.45),
+            )),
+            _ => None,
+        };
+        if let Some((lo_v, hi_v, col)) = dual_bounds {
+            for bound_v in [lo_v, hi_v] {
+                let b_frac = (bound_v / range + ch.offset).clamp(-0.49, 0.49);
+                let by = layout.frac_to_world_y(b_frac as f32);
+                gizmos.line_2d(Vec2::new(o.x - w / 2.0, by), Vec2::new(o.x + w / 2.0, by), col);
+            }
+        }
+    }
 }
 
 /// The pass/fail envelope as two dim-green polylines (lo and hi bounds).
@@ -139,13 +216,31 @@ pub(crate) fn draw_pf_mask(pf: Res<derived::PfState>, layout: Res<Layout>, mut g
     let x_at = |i: usize| o.x - w / 2.0 + i as f32 / (n - 1).max(1) as f32 * w;
     // The display window is +-100 counts (+-4 div); pin beyond that.
     let y_at = |raw: f32| layout.frac_to_world_y(raw.clamp(-125.0, 125.0) / 250.0);
-    let color = Color::srgba(0.2, 0.6, 0.3, 0.6);
+    let color = if pf.last_violations.is_empty() {
+        Color::srgba(0.2, 0.72, 0.35, 0.65)
+    } else {
+        Color::srgba(0.95, 0.3, 0.25, 0.75)
+    };
     for bounds in [&mask.lo, &mask.hi] {
         let points: Vec<Vec2> = (0..n)
             .step_by(step)
             .map(|i| Vec2::new(x_at(i), y_at(bounds[i])))
             .collect();
         gizmos.linestrip_2d(points, color);
+    }
+    // Marcar muestras fuera de tolerancia en rojo brillante directamente sobre la envolvente
+    if !pf.last_violations.is_empty() {
+        let viol_col = Color::srgba(1.0, 0.18, 0.18, 0.95);
+        let max_marks = 120;
+        let v_step = (pf.last_violations.len() / max_marks).max(1);
+        for &idx in pf.last_violations.iter().step_by(v_step) {
+            if idx < n {
+                let x = x_at(idx);
+                let y0 = y_at(mask.lo[idx]);
+                let y1 = y_at(mask.hi[idx]);
+                gizmos.line_2d(Vec2::new(x, y0), Vec2::new(x, y1), viol_col);
+            }
+        }
     }
 }
 

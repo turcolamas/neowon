@@ -8,6 +8,7 @@ use picowon_auto::{
     TrafficMonitor, TracerEquipment, ViTracerPreset, ViTracerState, get_all_presets,
 };
 use crate::ui::layout::Layout;
+use crate::ui::widgets::{ButtonTone, pro_button_widget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppMode {
@@ -82,6 +83,7 @@ impl FavoriteTool {
 
 #[derive(bevy::prelude::Resource)]
 pub struct AutomotiveUiState {
+    pub suite: crate::ui::suite::SuiteState,
     pub app_mode: AppMode,
     pub selected_category: Option<PresetCategory>,
     pub selected_preset_id: Option<&'static str>,
@@ -139,6 +141,20 @@ pub struct AutomotiveUiState {
     // Ventana flotante de procesamiento DSP por canal (Some(0) para CH1, Some(1) para CH2, None si está cerrada)
     pub dsp_floating_ch: Option<usize>,
 
+    // Fase 1: Sondas, Transductores, Unidades Físicas, Auto-Range, Alias y Contador HW por canal (Cap. 2.1 / 12.6)
+    pub ch_ext: [picowon_auto::ChannelExtendedState; 2],
+    pub probe_store: picowon_auto::CustomProbeStore,
+    pub probe_dialog_ch: Option<usize>,
+    pub custom_probe_draft: picowon_auto::ProbeSpec,
+    pub custom_probe_editor_open: bool,
+
+    // Fase 1: Histéresis configurable de Trigger (% de escala completa, Cap. 4.11)
+    pub trigger_hysteresis_pct: f32,
+
+    // Fase 2: Calificador de Disparo Automotriz Avanzado (Cap. 4.3, 4.5, 4.6, 4.7, 4.8)
+    pub trigger_qualifier: picowon_auto::TriggerQualifierConfig,
+    pub trigger_qualifier_rt: picowon_auto::TriggerQualifierRuntime,
+
     // Secuencia de arranque seguro y persistencia de canales
     pub safety: picowon_auto::StartupSafetyManager,
 
@@ -160,6 +176,7 @@ pub struct AutomotiveUiState {
     pub loaded_capture_info: Option<LoadedCaptureBannerInfo>,
     pub pending_dialog_result: std::sync::Arc<std::sync::Mutex<Option<NativeDialogResult>>>,
     pub is_dialog_waiting: bool,
+    pub plot_tools: crate::ui::plot_tools::PlotToolsState,
 }
 
 #[derive(Debug, Clone)]
@@ -284,6 +301,12 @@ impl AutomotiveUiState {
 
         self.app_mode = new_mode;
         self.strip_chart_view_active = new_mode == AppMode::Datalogger;
+        self.suite.active_workstation = match new_mode {
+            AppMode::Oscilloscope | AppMode::Datalogger => crate::ui::suite::SuiteWorkstation::ScopeDatalogger,
+            AppMode::ViCurveTracer => crate::ui::suite::SuiteWorkstation::ViTracer,
+            AppMode::CanLinWaveform | AppMode::CanLinTraffic => crate::ui::suite::SuiteWorkstation::CommsMonitor,
+            AppMode::ActuatorPwmVsSensor => crate::ui::suite::SuiteWorkstation::ActuatorsLoop,
+        };
     }
 }
 
@@ -295,6 +318,7 @@ impl Default for AutomotiveUiState {
         ruler.show_phase_bands = true;
 
         Self {
+            suite: crate::ui::suite::SuiteState::default(),
             app_mode: AppMode::Oscilloscope,
             selected_category: Some(PresetCategory::Ignition),
             selected_preset_id: Some("ign_cop_primary"),
@@ -335,6 +359,32 @@ impl Default for AutomotiveUiState {
             favorite_setup_open: false,
             dsp: [ChannelDspConfig::default(), ChannelDspConfig::default()],
             dsp_floating_ch: None,
+            ch_ext: [
+                picowon_auto::ChannelExtendedState::default(),
+                picowon_auto::ChannelExtendedState::default(),
+            ],
+            probe_store: picowon_auto::CustomProbeStore::load_or_default(),
+            probe_dialog_ch: None,
+            custom_probe_draft: picowon_auto::ProbeSpec {
+                id: "custom_user_1".into(),
+                name: "Sonda Personalizada 1".into(),
+                short_badge: "Cust".into(),
+                category: picowon_auto::ProbeCategory::Custom,
+                unit: picowon_auto::PhysicalUnit::Amps,
+                scaling: picowon_auto::ScalingMethod::Linear {
+                    gradient: 10.0,
+                    offset: 0.0,
+                },
+                recommended_coupling_ac: false,
+                recommended_lpf_hz: Some(2_000.0),
+                range_min: -100.0,
+                range_max: 100.0,
+                is_builtin: false,
+            },
+            custom_probe_editor_open: false,
+            trigger_hysteresis_pct: 1.5,
+            trigger_qualifier: picowon_auto::TriggerQualifierConfig::default(),
+            trigger_qualifier_rt: picowon_auto::TriggerQualifierRuntime::default(),
             safety: picowon_auto::StartupSafetyManager::new(),
             can_diag: picowon_auto::CanPhysicalMetrics::default(),
             saved_scope_config: None,
@@ -347,6 +397,7 @@ impl Default for AutomotiveUiState {
             loaded_capture_info: None,
             pending_dialog_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
             is_dialog_waiting: false,
+            plot_tools: Default::default(),
             show_vactual: true,
             show_ch2: true,
             time_window_secs: 30.0,
@@ -1536,7 +1587,9 @@ pub fn show_zoom_window(
                 // 2. Controles de Zoom: [-] [ Slider de Factor ] [+]
                 let zoom_mag = (1.0 / span.max(0.001)) as f32;
                 ui.horizontal(|ui| {
-                    if ui.add_sized(egui::vec2(22.0, 20.0), egui::Button::new("◀ -")).on_hover_text("Reducir zoom (alejar)").clicked() {
+                    let minus_btn = pro_button_widget("-", ButtonTone::Neutral, false, 20.0)
+                        .min_size(egui::vec2(22.0, 20.0));
+                    if ui.add(minus_btn).on_hover_text("Reducir zoom (alejar)").clicked() {
                         if span >= 0.98 {
                             crate::view::hview_home(phosphor);
                         } else {
@@ -1555,7 +1608,9 @@ pub fn show_zoom_window(
                         phosphor.hview = crate::view::hview_clamp(phosphor.hview.0, phosphor.hview.1);
                     }
 
-                    if ui.add_sized(egui::vec2(22.0, 20.0), egui::Button::new("+ ▶")).on_hover_text("Aumentar zoom (acercar)").clicked() {
+                    let plus_btn = pro_button_widget("+", ButtonTone::Neutral, false, 20.0)
+                        .min_size(egui::vec2(22.0, 20.0));
+                    if ui.add(plus_btn).on_hover_text("Aumentar zoom (acercar)").clicked() {
                         crate::view::hview_zoom(phosphor, phosphor.hview.0, true);
                     }
                 });
@@ -1574,18 +1629,19 @@ pub fn show_zoom_window(
                     ui.separator();
 
                     // Botón 1:1 restablecer
-                    if ui.button("↶ 1:1").on_hover_text("Restablecer zoom al 100% de la captura").clicked() {
+                    let home_btn = pro_button_widget("↶ 1:1", ButtonTone::Neutral, false, 20.0);
+                    if ui.add(home_btn).on_hover_text("Restablecer zoom al 100% de la captura").clicked() {
                         crate::view::hview_home(phosphor);
                     }
 
                     // Botón Mano / Paneo
-                    let btn_hand = egui::Button::new("✋ Pan")
-                        .fill(egui::Color32::from_rgb(38, 48, 66));
+                    let btn_hand = pro_button_widget("✋ Pan", ButtonTone::Primary, false, 20.0);
                     if ui.add(btn_hand).on_hover_text("Arrastre la forma de onda con el ratón: clic izq = horizontal, clic der = vertical").clicked() {
                     }
 
                     // Botón Lupa
-                    if ui.button("🔍 Lupa").on_hover_text("Gire la rueda del ratón sobre la señal para hacer zoom centrado en el cursor").clicked() {
+                    let btn_lupa = pro_button_widget("🔍 Lupa", ButtonTone::Warning, false, 20.0);
+                    if ui.add(btn_lupa).on_hover_text("Gire la rueda del ratón sobre la señal para hacer zoom centrado en el cursor").clicked() {
                         crate::view::hview_zoom(phosphor, phosphor.hview.0, true);
                     }
                 });
@@ -1609,34 +1665,51 @@ pub fn show_actuator_analysis_view(
         return;
     }
 
-    // Ingestar tramas crudas del osciloscopio para correlacionar PWM vs Sensor
+    // Ingestar tramas crudas calibradas en Voltios para correlacionar PWM vs Sensor
     for f in &link.arrived {
-        let ch1 = f.channels.iter().find(|c| c.ch == 0).map(|c| &c.data[..]).unwrap_or(&[]);
-        let ch2 = f.channels.iter().find(|c| c.ch == 1).map(|c| &c.data[..]).unwrap_or(&[]);
-        if !ch1.is_empty() && !ch2.is_empty() {
-            let v_div1 = (link.config.channels[0].volts_div * link.config.channels[0].probe * 5.0) as f32;
-            let v_div2 = (link.config.channels[1].volts_div * link.config.channels[1].probe * 5.0) as f32;
-            let ch1_v: Vec<f32> = ch1.iter().map(|&b| (b as f32 - 128.0) / 128.0 * v_div1).collect();
-            let ch2_v: Vec<f32> = ch2.iter().map(|&b| (b as f32 - 128.0) / 128.0 * v_div2).collect();
-            state.actuator.process_waveform(&ch1_v, &ch2_v, link.config.sample_rate, now);
+        let cap1 = f.channels.iter().find(|c| c.ch == 0);
+        let cap2 = f.channels.iter().find(|c| c.ch == 1);
+        if let (Some(c1), Some(c2)) = (cap1, cap2) {
+            if !c1.data.is_empty() && !c2.data.is_empty() {
+                let to_v = |cap: &neowon_core::ChannelCapture| -> Vec<f32> {
+                    cap.data
+                        .iter()
+                        .map(|&r| ((r as f64) * cap.cal.scale_i + cap.cal.offset_i) as f32)
+                        .collect()
+                };
+                let ch1_v = to_v(c1);
+                let ch2_v = to_v(c2);
+                state.actuator.process_waveform(&ch1_v, &ch2_v, link.config.sample_rate, now);
+            }
         }
     }
 
+    let is_split = state.suite.actuator_layout == crate::ui::suite::ActuatorViewLayout::SplitCurveAndWaveforms;
+    let target_rect = if is_split {
+        let split_h = (plot_rect.height() * 0.52).clamp(180.0, 420.0);
+        egui::Rect::from_min_max(
+            egui::pos2(plot_rect.min.x, plot_rect.max.y - split_h),
+            plot_rect.max,
+        )
+    } else {
+        plot_rect
+    };
+
     egui::Area::new("actuator_analysis_canvas".into())
-        .fixed_pos(plot_rect.min)
+        .fixed_pos(target_rect.min)
         .show(ctx, |ui| {
-            ui.set_width(plot_rect.width());
-            ui.set_height(plot_rect.height());
+            ui.set_width(target_rect.width());
+            ui.set_height(target_rect.height());
 
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(14, 16, 22))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 60, 80)))
+                .fill(egui::Color32::from_rgba_unmultiplied(14, 16, 22, if is_split { 242 } else { 255 }))
+                .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 125, 65)))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
                     // Cabecera con selector de Preset y Badges de Telemetría
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("🎯 ANÁLISIS DE ACTUADORES: PWM vs SENSOR")
+                            egui::RichText::new("🎯 LAZO CERRADO: ACTUADOR (CH1) vs SENSOR (CH2)")
                                 .strong()
                                 .color(egui::Color32::from_rgb(255, 175, 40)),
                         );
@@ -1656,28 +1729,77 @@ pub fn show_actuator_analysis_view(
 
                         ui.separator();
 
+                        let layout_btn_txt = if is_split {
+                            "🗖 Pantalla Completa X-Y"
+                        } else {
+                            "🔀 Vista Dividida (Ondas + Curva X-Y)"
+                        };
+                        if ui.button(layout_btn_txt).clicked() {
+                            state.suite.actuator_layout = if is_split {
+                                crate::ui::suite::ActuatorViewLayout::TransferCurveXy
+                            } else {
+                                crate::ui::suite::ActuatorViewLayout::SplitCurveAndWaveforms
+                            };
+                        }
+
                         if ui.button("🗑 Limpiar Curva").clicked() {
                             state.actuator.clear();
+                        }
+                        ui.separator();
+                        if ui
+                            .button("📸 Patrón Dorado")
+                            .on_hover_text("Guardar la curva actual como Patrón Dorado de referencia")
+                            .clicked()
+                        {
+                            state.actuator.capture_golden();
+                        }
+                        if !state.actuator.golden_points.is_empty() {
+                            ui.add(
+                                egui::DragValue::new(&mut state.actuator.tolerance_v)
+                                    .speed(0.05)
+                                    .range(0.05..=2.0)
+                                    .prefix("±")
+                                    .suffix(" V"),
+                            );
+                            if ui.small_button("✕ Patrón").clicked() {
+                                state.actuator.clear_golden();
+                            }
                         }
                     });
 
                     ui.add_space(4.0);
 
                     // Badges de telemetría y diagnósticos
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let duty = state.actuator.current_duty;
                         let freq = state.actuator.current_freq;
                         let s_v = state.actuator.current_sensor_v;
                         let hyst = state.actuator.hysteresis_area;
 
-                        ui.label(egui::RichText::new(format!("PWM Freq: {:.1} Hz", freq)).monospace().strong());
+                        ui.label(egui::RichText::new(format!("PWM: {:.1} Hz", freq)).monospace().strong());
                         ui.label(egui::RichText::new(format!("Duty: {:.1} %", duty)).monospace().strong().color(egui::Color32::from_rgb(255, 215, 60)));
                         ui.label(egui::RichText::new(format!("Sensor: {:.2} V", s_v)).monospace().strong().color(egui::Color32::from_rgb(80, 200, 255)));
                         ui.label(egui::RichText::new(format!("Histéresis ΔV: {:.2} V", hyst)).monospace().strong());
+                        ui.label(egui::RichText::new(format!("Retardo Δt: {:.1} ms", state.actuator.response_delay_ms)).monospace());
 
                         ui.separator();
+                        ui.label(egui::RichText::new("● Ascenso").size(10.0).color(egui::Color32::from_rgb(55, 230, 145)));
+                        ui.label(egui::RichText::new("● Descenso").size(10.0).color(egui::Color32::from_rgb(255, 145, 55)));
 
-                        if state.actuator.mechanical_sticking_warning {
+                        if !state.actuator.golden_points.is_empty() {
+                            let (txt, col) = if state.actuator.golden_pass {
+                                (
+                                    format!("✅ PATRÓN OK (max Δ {:.2}V)", state.actuator.golden_deviation_max_v),
+                                    egui::Color32::from_rgb(80, 230, 120),
+                                )
+                            } else {
+                                (
+                                    format!("✖ FUERA PATRÓN (Δ {:.2}V)", state.actuator.golden_deviation_max_v),
+                                    egui::Color32::from_rgb(255, 85, 85),
+                                )
+                            };
+                            ui.label(egui::RichText::new(txt).strong().color(col));
+                        } else if state.actuator.mechanical_sticking_warning {
                             ui.label(
                                 egui::RichText::new("⚠️ ALERTA: TRABAMIENTO MECÁNICO / ROZAMIENTO EXCESIVO")
                                     .strong()
@@ -1691,7 +1813,7 @@ pub fn show_actuator_analysis_view(
                             );
                         } else if !state.actuator.points.is_empty() {
                             ui.label(
-                                egui::RichText::new("✅ RESPUESTA NORMAL")
+                                egui::RichText::new("✅ LAZO CERRADO NORMAL")
                                     .strong()
                                     .color(egui::Color32::from_rgb(80, 230, 120)),
                             );
@@ -1751,7 +1873,33 @@ pub fn show_actuator_analysis_view(
                     let ideal_p1 = egui::pos2(canvas_rect.max.x - pad_x, canvas_rect.max.y - pad_y - (4.5 / 5.0) * plot_h);
                     painter.line_segment([ideal_p0, ideal_p1], egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 200, 50, 70)));
 
-                    // Trazar puntos de la curva de transferencia adquiridos
+                    // Banda de tolerancia y Patrón Dorado (si está capturado)
+                    if state.actuator.golden_points.len() >= 2 {
+                        let mut ordered = state.actuator.golden_points.clone();
+                        ordered.sort_by(|a, b| a.duty_pct.total_cmp(&b.duty_pct));
+                        let tol = state.actuator.tolerance_v;
+                        let tol_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 215, 65, 110));
+                        let gold_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(255, 220, 75, 195));
+                        let to_pt = |duty: f32, v: f32| {
+                            egui::pos2(
+                                canvas_rect.min.x + pad_x + (duty / 100.0).clamp(0.0, 1.0) * plot_w,
+                                canvas_rect.max.y - pad_y - (v / 5.0).clamp(0.0, 1.0) * plot_h,
+                            )
+                        };
+                        let mut main_pts = Vec::with_capacity(ordered.len());
+                        let mut hi_pts = Vec::with_capacity(ordered.len());
+                        let mut lo_pts = Vec::with_capacity(ordered.len());
+                        for g in &ordered {
+                            main_pts.push(to_pt(g.duty_pct, g.sensor_v));
+                            hi_pts.push(to_pt(g.duty_pct, g.sensor_v + tol));
+                            lo_pts.push(to_pt(g.duty_pct, g.sensor_v - tol));
+                        }
+                        painter.add(egui::Shape::line(main_pts, gold_stroke));
+                        painter.add(egui::Shape::line(hi_pts, tol_stroke));
+                        painter.add(egui::Shape::line(lo_pts, tol_stroke));
+                    }
+
+                    // Trazar puntos del lazo de histéresis X-Y diferenciando Ascenso vs Descenso
                     let points_count = state.actuator.points.len();
                     if points_count >= 2 {
                         let mut prev_screen_pos: Option<egui::Pos2> = None;
@@ -1764,12 +1912,17 @@ pub fn show_actuator_analysis_view(
 
                             let age_frac = idx as f32 / points_count as f32;
                             let alpha = (age_frac * 200.0 + 55.0) as u8;
-                            let curve_col = egui::Color32::from_rgba_unmultiplied(50, 210, 255, alpha);
+                            let (r, g, b) = match p.direction {
+                                1 => (55, 230, 145),  // Ascenso (+dDuty)
+                                -1 => (255, 145, 55), // Descenso (-dDuty)
+                                _ => (70, 210, 255),  // Estacionario
+                            };
+                            let curve_col = egui::Color32::from_rgba_unmultiplied(r, g, b, alpha);
 
                             if let Some(prev) = prev_screen_pos {
-                                painter.line_segment([prev, screen_pos], egui::Stroke::new(1.5, curve_col));
+                                painter.line_segment([prev, screen_pos], egui::Stroke::new(1.7, curve_col));
                             }
-                            painter.circle_filled(screen_pos, 1.8, curve_col);
+                            painter.circle_filled(screen_pos, 2.0, curve_col);
                             prev_screen_pos = Some(screen_pos);
                         }
 
@@ -1799,7 +1952,180 @@ pub fn show_actuator_analysis_view(
         });
 }
 
-/// Dibuja la vista de Monitor de Tráfico de Bus de Red (CAN 2.0A/B & LIN)
+/// Ingesta común de paquetes decodificados hacia el Monitor de Tráfico en Vivo.
+pub fn ingest_decoded_traffic(traffic: &mut TrafficMonitor, dec: &crate::decode::DecodeState) {
+    for pkt in &dec.packets {
+        let parsed_id = u32::from_str_radix(pkt.id_or_pid.trim_start_matches("0x"), 16).unwrap_or(0);
+        match pkt.protocol {
+            crate::decode::Protocol::Can => {
+                traffic.ingest_can(pkt.start_time, parsed_id, pkt.is_extended, pkt.dlc, &pkt.data);
+            }
+            crate::decode::Protocol::CanFd => {
+                traffic.ingest_packet(BusProtocol::CanFd, pkt.start_time, parsed_id, pkt.is_extended, pkt.dlc, &pkt.data);
+            }
+            crate::decode::Protocol::J1939 => {
+                traffic.ingest_packet(BusProtocol::J1939, pkt.start_time, parsed_id, true, pkt.dlc, &pkt.data);
+            }
+            crate::decode::Protocol::Lin => {
+                traffic.ingest_lin(pkt.start_time, parsed_id as u8, pkt.data.len(), &pkt.data);
+            }
+            crate::decode::Protocol::Sent => {
+                traffic.ingest_packet(BusProtocol::Sent, pkt.start_time, parsed_id, false, pkt.dlc, &pkt.data);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Barra y tabla compartida de Tráfico en Vivo (`CAN`, `CAN FD`, `J1939`, `LIN`, `SENT` + Link Files `.csv`).
+pub fn render_traffic_monitor_table(
+    ui: &mut egui::Ui,
+    traffic: &mut TrafficMonitor,
+    grid_id: &str,
+    max_height: f32,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Protocolo:").size(10.5).weak());
+        for b in BusProtocol::ALL {
+            if ui.selectable_label(traffic.bus == b, b.label()).clicked() {
+                traffic.bus = b;
+            }
+        }
+        ui.separator();
+        ui.add(
+            egui::TextEdit::singleline(&mut traffic.filter_text)
+                .hint_text("Filtrar ID / PGN / Link...")
+                .desired_width(140.0),
+        );
+        if !traffic.filter_text.is_empty() && ui.small_button("✕").clicked() {
+            traffic.filter_text.clear();
+        }
+        ui.separator();
+        if ui
+            .small_button("🔗 Link Auto CSV")
+            .on_hover_text("Cargar diccionario automotriz OBD-II / J1939 de ejemplo")
+            .clicked()
+        {
+            traffic.link_dict.load_csv_str(
+                "obd_j1939_demo.csv",
+                picowon_auto::traffic::LinkDictionary::sample_automotive_csv(),
+            );
+            traffic.refresh_descriptions();
+        }
+        if ui
+            .small_button("💾 Plantilla CSV")
+            .on_hover_text("Guardar plantilla Link File en Capturas/Links/ejemplo_link.csv")
+            .clicked()
+        {
+            let dir = std::path::Path::new("Capturas/Links");
+            let _ = std::fs::create_dir_all(dir);
+            let path = dir.join("ejemplo_link.csv");
+            let _ = std::fs::write(&path, picowon_auto::traffic::LinkDictionary::sample_automotive_csv());
+            traffic.link_dict.load_csv_str("ejemplo_link.csv", picowon_auto::traffic::LinkDictionary::sample_automotive_csv());
+            traffic.refresh_descriptions();
+        }
+        if let Ok(entries) = std::fs::read_dir("Capturas/Links") {
+            let files: Vec<_> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv")))
+                .collect();
+            if !files.is_empty() {
+                let sel = if traffic.link_dict.filename.is_empty() {
+                    "Link CSV...".to_string()
+                } else {
+                    traffic.link_dict.filename.clone()
+                };
+                egui::ComboBox::from_id_salt((grid_id, "links"))
+                    .selected_text(sel)
+                    .show_ui(ui, |ui| {
+                        for p in files {
+                            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("link.csv").to_string();
+                            if ui.selectable_label(traffic.link_dict.filename == name, &name).clicked() {
+                                if let Ok(txt) = std::fs::read_to_string(&p) {
+                                    traffic.link_dict.load_csv_str(&name, &txt);
+                                    traffic.refresh_descriptions();
+                                }
+                            }
+                        }
+                    });
+            }
+        }
+        if !traffic.link_dict.filename.is_empty() {
+            ui.label(
+                egui::RichText::new(format!("🔗 {} ({})", traffic.link_dict.filename, traffic.link_dict.entry_count))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(130, 230, 175)),
+            );
+        }
+    });
+    ui.add_space(3.0);
+
+    egui::ScrollArea::both()
+        .max_height(max_height.max(80.0))
+        .show(ui, |ui| {
+            egui::Grid::new(grid_id)
+                .striped(true)
+                .spacing([10.0, 3.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("ID / PGN").strong().size(10.5).color(egui::Color32::from_rgb(255, 180, 55)));
+                    ui.label(egui::RichText::new("Conteo").strong().size(10.5));
+                    ui.label(egui::RichText::new("Tasa (Hz)").strong().size(10.5));
+                    ui.label(egui::RichText::new("Δt (ms)").strong().size(10.5));
+                    ui.label(egui::RichText::new("DLC").strong().size(10.5));
+                    ui.label(egui::RichText::new("Datos / Payload (Hex) [Cambios]").strong().size(10.5).color(egui::Color32::from_rgb(120, 220, 150)));
+                    ui.label(egui::RichText::new("Señal / J1939 / Link File").strong().size(10.5).color(egui::Color32::from_rgb(135, 220, 255)));
+                    ui.end_row();
+
+                    let rows = traffic.get_sorted_rows();
+                    if rows.is_empty() {
+                        ui.label(egui::RichText::new("Esperando tramas decodificadas...").weak().small());
+                        ui.end_row();
+                    }
+                    for r in rows {
+                        let id_str = if let Some(pgn) = r.j1939_pgn {
+                            format!("0x{:08X} (PGN:{:04X})", r.id, pgn)
+                        } else if r.is_extended {
+                            format!("0x{:08X}", r.id)
+                        } else {
+                            format!("0x{:03X}", r.id)
+                        };
+                        ui.label(egui::RichText::new(id_str).monospace().strong().color(egui::Color32::from_rgb(255, 205, 65)));
+                        ui.label(egui::RichText::new(format!("{}", r.count)).monospace());
+                        ui.label(egui::RichText::new(format!("{:.1}", r.freq_hz)).monospace());
+                        ui.label(egui::RichText::new(format!("{:.1}", r.delta_ms)).monospace());
+                        ui.label(egui::RichText::new(format!("{}", r.dlc)).monospace());
+
+                        ui.horizontal(|ui| {
+                            for (byte_idx, &b) in r.data.iter().enumerate() {
+                                let has_changed = byte_idx < 64 && (r.changed_mask & (1u64 << byte_idx)) != 0;
+                                let byte_text = format!("{:02X}", b);
+                                if has_changed {
+                                    ui.label(
+                                        egui::RichText::new(byte_text)
+                                            .monospace()
+                                            .strong()
+                                            .color(egui::Color32::BLACK)
+                                            .background_color(egui::Color32::from_rgb(255, 185, 30)),
+                                    );
+                                } else {
+                                    ui.label(egui::RichText::new(byte_text).monospace().color(egui::Color32::from_gray(210)));
+                                }
+                            }
+                        });
+
+                        ui.label(
+                            egui::RichText::new(r.signal_desc.as_deref().unwrap_or("-"))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(155, 230, 205)),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+/// Dibuja la vista de Monitor de Tráfico de Bus de Red (CAN 2.0A/B, CAN FD, J1939, LIN & SENT)
 pub fn show_bus_traffic_view(
     ctx: &egui::Context,
     layout: &Layout,
@@ -1814,19 +2140,7 @@ pub fn show_bus_traffic_view(
         return;
     }
 
-    // Ingestar paquetes del decodificador serie
-    for pkt in &dec.packets {
-        let parsed_id = u32::from_str_radix(pkt.id_or_pid.trim_start_matches("0x"), 16).unwrap_or(0);
-        match pkt.protocol {
-            crate::decode::Protocol::Can => {
-                state.traffic.ingest_can(pkt.start_time, parsed_id, false, pkt.data.len(), &pkt.data);
-            }
-            crate::decode::Protocol::Lin => {
-                state.traffic.ingest_lin(pkt.start_time, parsed_id as u8, pkt.data.len(), &pkt.data);
-            }
-            _ => {}
-        }
-    }
+    ingest_decoded_traffic(&mut state.traffic, dec);
 
     egui::Area::new("bus_traffic_canvas".into())
         .fixed_pos(plot_rect.min)
@@ -1839,103 +2153,27 @@ pub fn show_bus_traffic_view(
                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 55, 75)))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
-                    // Cabecera del analizador de tráfico
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("🌐 MONITOR DE TRÁFICO DE RED Y TRAMAS DE PROTOCOLO")
+                            egui::RichText::new("🌐 MONITOR DE TRÁFICO DE RED (CAN / CAN FD / J1939 / LIN / SENT)")
                                 .strong()
                                 .color(egui::Color32::from_rgb(100, 200, 255)),
                         );
-
                         ui.separator();
-
-                        let bus_name = match state.traffic.bus {
-                            BusProtocol::Can => "CAN 2.0A/B",
-                            BusProtocol::Lin => "LIN 1.3/2.x",
-                        };
-                        if ui.button(egui::RichText::new(format!("Bus: {bus_name}")).strong()).clicked() {
-                            state.traffic.bus = match state.traffic.bus {
-                                BusProtocol::Can => BusProtocol::Lin,
-                                BusProtocol::Lin => BusProtocol::Can,
-                            };
-                        }
-
-                        ui.separator();
-
                         ui.label(
-                            egui::RichText::new(format!("Tramas Capturadas: {}", state.traffic.total_frames_captured))
+                            egui::RichText::new(format!("Tramas: {}", state.traffic.total_frames_captured))
                                 .monospace(),
                         );
-
-                        ui.separator();
-
                         let pause_text = if state.traffic.pause_updates { "▶ Reanudar" } else { "⏸ Pausar" };
                         if ui.button(pause_text).clicked() {
                             state.traffic.pause_updates = !state.traffic.pause_updates;
                         }
-
                         if ui.button("🗑 Limpiar").clicked() {
                             state.traffic.clear();
                         }
                     });
-
-                    ui.add_space(4.0);
                     ui.separator();
-                    ui.add_space(2.0);
-
-                    // Tabla de tramas agrupadas por ID
-                    egui::ScrollArea::both()
-                        .max_height(plot_rect.height() - 70.0)
-                        .show(ui, |ui| {
-                            egui::Grid::new("bus_traffic_grid")
-                                .striped(true)
-                                .spacing([12.0, 4.0])
-                                .show(ui, |ui| {
-                                    // Encabezados
-                                    ui.label(egui::RichText::new("ID (Hex)").strong().color(egui::Color32::from_rgb(255, 175, 50)));
-                                    ui.label(egui::RichText::new("Conteo").strong().color(egui::Color32::WHITE));
-                                    ui.label(egui::RichText::new("Tasa (Hz)").strong().color(egui::Color32::WHITE));
-                                    ui.label(egui::RichText::new("Δt (ms)").strong().color(egui::Color32::WHITE));
-                                    ui.label(egui::RichText::new("DLC").strong().color(egui::Color32::WHITE));
-                                    ui.label(egui::RichText::new("Datos / Payload (Hex) [Cambios Resaltados]").strong().color(egui::Color32::from_rgb(120, 220, 150)));
-                                    ui.end_row();
-
-                                    let rows = state.traffic.get_sorted_rows();
-                                    for r in rows {
-                                        let id_str = format!("0x{:03X}", r.id);
-                                        ui.label(egui::RichText::new(id_str).monospace().strong().color(egui::Color32::from_rgb(255, 200, 60)));
-                                        ui.label(egui::RichText::new(format!("{}", r.count)).monospace());
-                                        ui.label(egui::RichText::new(format!("{:.1}", r.freq_hz)).monospace());
-                                        ui.label(egui::RichText::new(format!("{:.1}", r.delta_ms)).monospace());
-                                        ui.label(egui::RichText::new(format!("{}", r.dlc)).monospace());
-
-                                        // Renderizado de bytes de datos con resaltado dinámico en vivo
-                                        ui.horizontal(|ui| {
-                                            for (byte_idx, &b) in r.data.iter().enumerate() {
-                                                let has_changed = (r.changed_mask & (1 << byte_idx)) != 0;
-                                                let byte_text = format!("{:02X}", b);
-                                                if has_changed {
-                                                    ui.label(
-                                                        egui::RichText::new(byte_text)
-                                                            .monospace()
-                                                            .strong()
-                                                            .color(egui::Color32::BLACK)
-                                                            .background_color(egui::Color32::from_rgb(255, 185, 30)),
-                                                    );
-                                                } else {
-                                                    ui.label(
-                                                        egui::RichText::new(byte_text)
-                                                            .monospace()
-                                                            .color(egui::Color32::from_gray(210)),
-                                                    );
-                                                }
-                                            }
-                                        });
-
-                                        ui.end_row();
-                                    }
-                                });
-                        });
+                    render_traffic_monitor_table(ui, &mut state.traffic, "bus_traffic_grid", plot_rect.height() - 105.0);
                 });
         });
 }
@@ -2938,8 +3176,8 @@ pub fn show_vi_tracer_view(
                                                  // CH1 Sensibilidad y Escala Real por Cuadrícula
                                                  ui.horizontal(|ui| {
                                                      ui.label(egui::RichText::new("CH1 X (Tensión):").size(10.5).strong().color(egui::Color32::from_rgb(255, 215, 0)));
-                                                     if ui.small_button("◀").on_hover_text("Bajar escala de tensión").clicked() {
-                                                         crate::view::zoom_channel(link, 0, false);
+                                                     if ui.small_button("-").on_hover_text("Bajar escala de tensión").clicked() {
+                                                         crate::view::zoom_channel(link, 0, true);
                                                         let new_v = link.config.channels[0].volts_div * link.config.channels[0].probe;
                                                         state.vi_tracer.max_voltage_scale = (new_v * (state.vi_tracer.grid_divs_h as f64 / 2.0)) as f32;
                                                         state.vi_tracer.reprocess_last();
@@ -2947,8 +3185,8 @@ pub fn show_vi_tracer_view(
                                                      let p1 = link.config.channels[0].probe;
                                                      let hw1 = link.config.channels[0].volts_div;
                                                      ui.label(format!("{:.2}V (x{:.0})", hw1, p1));
-                                                     if ui.small_button("▶").on_hover_text("Subir escala de tensión").clicked() {
-                                                         crate::view::zoom_channel(link, 0, true);
+                                                     if ui.small_button("+").on_hover_text("Subir escala de tensión").clicked() {
+                                                         crate::view::zoom_channel(link, 0, false);
                                                         let new_v = link.config.channels[0].volts_div * link.config.channels[0].probe;
                                                         state.vi_tracer.max_voltage_scale = (new_v * (state.vi_tracer.grid_divs_h as f64 / 2.0)) as f32;
                                                         state.vi_tracer.reprocess_last();
@@ -2968,8 +3206,8 @@ pub fn show_vi_tracer_view(
                                                  // CH2 Sensibilidad y Escala Real por Cuadrícula
                                                  ui.horizontal(|ui| {
                                                      ui.label(egui::RichText::new("CH2 Y (Corriente):").size(10.5).strong().color(egui::Color32::from_rgb(0, 200, 255)));
-                                                     if ui.small_button("◀").on_hover_text("Bajar escala de corriente").clicked() {
-                                                         crate::view::zoom_channel(link, 1, false);
+                                                     if ui.small_button("-").on_hover_text("Bajar escala de corriente").clicked() {
+                                                         crate::view::zoom_channel(link, 1, true);
                                                         let new_v = link.config.channels[1].volts_div * link.config.channels[1].probe;
                                                         let new_i_ma = (new_v / (state.vi_tracer.r_sense_ohms as f64).max(0.1)) * 1000.0;
                                                         state.vi_tracer.max_current_scale_ma = (new_i_ma * (state.vi_tracer.grid_divs_v as f64 / 2.0)) as f32;
@@ -2978,8 +3216,8 @@ pub fn show_vi_tracer_view(
                                                      let p2 = link.config.channels[1].probe;
                                                      let hw2 = link.config.channels[1].volts_div;
                                                      ui.label(format!("{:.2}V (x{:.0})", hw2, p2));
-                                                     if ui.small_button("▶").on_hover_text("Subir escala de corriente").clicked() {
-                                                         crate::view::zoom_channel(link, 1, true);
+                                                     if ui.small_button("+").on_hover_text("Subir escala de corriente").clicked() {
+                                                         crate::view::zoom_channel(link, 1, false);
                                                         let new_v = link.config.channels[1].volts_div * link.config.channels[1].probe;
                                                         let new_i_ma = (new_v / (state.vi_tracer.r_sense_ohms as f64).max(0.1)) * 1000.0;
                                                         state.vi_tracer.max_current_scale_ma = (new_i_ma * (state.vi_tracer.grid_divs_v as f64 / 2.0)) as f32;
@@ -3952,6 +4190,20 @@ pub fn show_dsp_floating_window(
                                 dsp.lpf_cutoff_hz = fc;
                             }
                         });
+
+                        // Protección dinámica de Nyquist (< 0.45 * Fs, Cap. 2.1)
+                        let (eff_fc, clamped_nyquist) =
+                            picowon_auto::effective_lpf_cutoff_hz(dsp.lpf_cutoff_hz, link.config.sample_rate);
+                        if clamped_nyquist {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 200, 90),
+                                format!(
+                                    "🛡 Protección Nyquist activa: corte limitado a {} (45% de Fs = {})",
+                                    crate::derived::fmt_si(eff_fc, "Hz"),
+                                    crate::derived::fmt_si(link.config.sample_rate, "S/s")
+                                ),
+                            );
+                        }
                     }
                 });
 
@@ -3968,11 +4220,11 @@ pub fn show_dsp_floating_window(
                             let total_bits = 8.0 + dsp.res_enhance_bits;
                             ui.colored_label(egui::Color32::from_rgb(100, 200, 255), format!("{total_bits:.1} bits"));
                         } else {
-                            ui.label(egui::RichText::new("(8 bits nativo)").weak().size(10.0));
+                            ui.label(egui::RichText::new("(8.0 bits nativo)").weak().size(10.0));
                         }
                     });
                     ui.label(
-                        egui::RichText::new("Promedia ruido de cuantización para revelar micro-ondulaciones sin alterar amplitud.")
+                        egui::RichText::new("Promedia ruido de cuantización (pasos de 0.5 bits desde 8.5 hasta 12.0 bits).")
                             .weak()
                             .size(9.5),
                     );
@@ -3980,12 +4232,29 @@ pub fn show_dsp_floating_window(
                     ui.horizontal_wrapped(|ui| {
                         for &(bits, label) in &picowon_auto::RES_ENHANCE_PRESETS {
                             let is_sel = (dsp.res_enhance_bits - bits).abs() < 0.1;
-                            let short_text = if bits == 0.0 { "Off" } else { label.split(' ').next().unwrap_or(label) };
+                            let short_text = if bits == 0.0 {
+                                "Off (8.0b)".to_string()
+                            } else {
+                                format!("{:.1}b", 8.0 + bits)
+                            };
                             if ui.selectable_label(is_sel, short_text).on_hover_text(label).clicked() {
                                 dsp.res_enhance_bits = bits;
                             }
                         }
                     });
+
+                    if let Some(bw_hz) =
+                        picowon_auto::res_enhance_effective_bandwidth_hz(link.config.sample_rate, dsp.res_enhance_bits)
+                    {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(140, 220, 175),
+                            format!(
+                                "ℹ Ancho de banda plano resultante (-3 dB): {} (a Fs = {})",
+                                crate::derived::fmt_si(bw_hz, "Hz"),
+                                crate::derived::fmt_si(link.config.sample_rate, "S/s")
+                            ),
+                        );
+                    }
                 });
 
             // 3. INVERSIÓN Y TARA / AUTO-ZERO

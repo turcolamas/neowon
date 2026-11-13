@@ -29,6 +29,8 @@ struct Params {
     col0: vec4f,
     col1: vec4f,
     col2: vec4f,
+    split_grid: u32,
+    xy_square: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -63,7 +65,19 @@ fn sample_row(ch: u32, i: u32) -> f32 {
     } else if (ch == 1u) {
         delta_off = params.off1;
     }
-    let frac = clamp(0.5 - (raw / 250.0 + delta_off), 0.0, 1.0);
+    let norm = raw / 250.0 + delta_off;
+    var frac = 0.5 - norm;
+    if (params.split_grid == 1u && params.mode != 2u) {
+        if (ch == 0u) {
+            frac = clamp(0.25 - 0.5 * norm, 0.0, 0.495);
+        } else if (ch == 1u) {
+            frac = clamp(0.75 - 0.5 * norm, 0.505, 1.0);
+        } else {
+            frac = clamp(frac, 0.0, 1.0);
+        }
+    } else {
+        frac = clamp(frac, 0.0, 1.0);
+    }
     return frac * f32(params.height - 1u);
 }
 
@@ -120,9 +134,10 @@ fn raster(@builtin(global_invocation_id) id: vec3<u32>) {
         let out0 = off_screen(wave[i - 1u]) || off_screen(wave[params.samples + i - 1u]);
         let out1 = off_screen(wave[i]) || off_screen(wave[params.samples + i]);
         if (out0 && out1) { return; }
-        // Same +-4-division window as the vertical axis.
-        let fx0 = clamp(0.5 + wave[i - 1u] / 250.0, 0.0, 1.0);
-        let fx1 = clamp(0.5 + wave[i] / 250.0, 0.0, 1.0);
+        // Same +-4-division window as the vertical axis, scaled 1:1 when xy_square is active.
+        let x_aspect = select(1.0, f32(params.height) / f32(params.width), params.xy_square == 1u);
+        let fx0 = clamp(0.5 + (wave[i - 1u] / 250.0 + params.off0) * x_aspect, 0.0, 1.0);
+        let fx1 = clamp(0.5 + (wave[i] / 250.0 + params.off0) * x_aspect, 0.0, 1.0);
         let x0 = f32(u32(fx0 * f32(params.width - 1u)));
         let x1 = f32(u32(fx1 * f32(params.width - 1u)));
         let y0 = sample_row(1u, i - 1u);

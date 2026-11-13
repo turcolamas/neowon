@@ -1,0 +1,16 @@
+{
+  "ch1": {
+    "enabled": true,
+    "volts_div": 2.0,
+    "probe": 10.0,
+    "coupling_dc": true,
+    "offset": 0.0
+  },
+  "ch2": {
+    "enabled": false,
+    "volts_div": 2.0,
+    "probe": 10.0,
+    "coupling_dc": true,
+    "offset": 0.0
+  }
+}

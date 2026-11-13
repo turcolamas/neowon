@@ -17,6 +17,8 @@ const REF_COLORS: [egui::Color32; 2] = [
 pub struct RefState {
     pub traces: [Option<ChannelCapture>; 2],
     pub show: bool,
+    /// Ref Delay: desplazamiento horizontal de cada referencia, en divisiones (+ = a la derecha).
+    pub delay_div: [f32; 2],
 }
 
 impl RefState {
@@ -53,17 +55,22 @@ pub fn overlay(ctx: &egui::Context, l: &Layout, refs: &RefState) {
         // At most ~1k points: min/max-preserving would be nicer, but a
         // stride is fine for a ghost.
         let step = (t.data.len() / 1024).max(1);
+        let shift = refs.delay_div[ch] * rect.width() / crate::ui::layout::H_DIVS as f32;
         let pts: Vec<egui::Pos2> = t
             .data
             .iter()
             .step_by(step)
             .enumerate()
             .map(|(i, &r)| {
-                let x = rect.left() + (i * step) as f32 / (t.data.len() - 1) as f32 * rect.width();
+                let x = rect.left() + (i * step) as f32 / (t.data.len() - 1) as f32 * rect.width() + shift;
                 let y = rect.center().y - r / 200.0 * rect.height();
                 egui::pos2(x, y.clamp(rect.top(), rect.bottom()))
             })
+            .filter(|p| p.x >= rect.left() && p.x <= rect.right())
             .collect();
+        if pts.len() < 2 {
+            continue;
+        }
         painter.add(egui::Shape::line(
             pts,
             egui::Stroke::new(1.0, REF_COLORS[ch]),

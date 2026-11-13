@@ -181,6 +181,9 @@ impl Backend for SimBackend {
 
     fn stimuli(&self) -> Vec<&'static str> {
         let mut all = Scenario::PRESETS.to_vec();
+        all.push("auto-ckp-60-2");
+        all.push("auto-can-diff");
+        all.push("auto-pwm-actuator");
         all.push("quake");
         all.push("quake-slow");
         all
@@ -213,6 +216,7 @@ mod tests {
                 level,
                 sweep,
                 holdoff: 100e-9,
+                ..Default::default()
             },
             position: 0.5,
             ..Default::default()

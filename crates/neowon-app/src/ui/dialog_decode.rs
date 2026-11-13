@@ -1,4 +1,5 @@
 use bevy_egui::egui;
+use picowon_auto::traffic::{BusProtocol, LinkDictionary, TrafficMonitor};
 
 use crate::decode::{DecodeState, Protocol};
 use crate::derived::fmt_si;
@@ -44,7 +45,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut DecodeState) {
 
         if st.protocol == Protocol::Off {
             ui.label(
-                egui::RichText::new("Seleccione un protocolo (CAN, LIN, UART, I²C, SPI, 1-Wire) para decodificar en tiempo real.")
+                egui::RichText::new("Seleccione un protocolo (CAN, CAN-FD, J1939, SENT, LIN, UART, I²C, SPI, 1-Wire) para decodificar en tiempo real.")
                     .weak()
                     .small(),
             );
@@ -72,10 +73,10 @@ pub fn show(ui: &mut egui::Ui, st: &mut DecodeState) {
             });
         }
 
-        // CAN Bus parameters
-        if st.protocol == Protocol::Can {
+        // CAN / CAN-FD / J1939 Bus parameters
+        if matches!(st.protocol, Protocol::Can | Protocol::CanFd | Protocol::J1939) {
             ui.horizontal(|ui| {
-                ui.label("Baud:");
+                ui.label("Baud Nom:");
                 for &b in &[125_000.0, 250_000.0, 500_000.0, 1_000_000.0] {
                     let label = format!("{}k", (b / 1000.0) as u32);
                     if ui.selectable_label((st.can.baud - b).abs() < 1.0, label).clicked() {
@@ -92,6 +93,18 @@ pub fn show(ui: &mut egui::Ui, st: &mut DecodeState) {
                         .suffix(" bps"),
                 );
             });
+            if st.protocol == Protocol::CanFd {
+                st.can.fd_enabled = true;
+                ui.horizontal(|ui| {
+                    ui.label("Data Baud (BRS):");
+                    for &b in &[1_000_000.0, 2_000_000.0, 5_000_000.0] {
+                        let label = format!("{}M", (b / 1_000_000.0) as u32);
+                        if ui.selectable_label((st.can.data_baud - b).abs() < 1.0, label).clicked() {
+                            st.can.data_baud = b;
+                        }
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 ui.label("Sample Point:");
                 ui.add(
@@ -100,8 +113,30 @@ pub fn show(ui: &mut egui::Ui, st: &mut DecodeState) {
                         .suffix(" %"),
                 );
             });
+            ui.checkbox(&mut st.differential_can, "Decodificación Diferencial (CH1 - CH2)");
+            ui.checkbox(&mut st.can.inverted, "Invertir Polaridad (ej. CAN_L)");
+        }
+
+        // SENT SAE J2716 parameters
+        if st.protocol == Protocol::Sent {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut st.can.inverted, "Invertir Polaridad (ej. CAN_L)");
+                ui.label("Tick Time:");
+                for &t in &[1.5, 3.0, 6.0] {
+                    if ui.selectable_label((st.sent.tick_us - t).abs() < 0.05, format!("{t} µs")).clicked() {
+                        st.sent.tick_us = t;
+                    }
+                }
+                ui.add(
+                    egui::DragValue::new(&mut st.sent.tick_us)
+                        .speed(0.1)
+                        .range(0.5..=90.0)
+                        .suffix(" µs"),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Nibles Datos:");
+                ui.add(egui::DragValue::new(&mut st.sent.data_nibbles).range(1..=8));
+                ui.checkbox(&mut st.sent.check_crc, "Verificar CRC4");
             });
         }
 
@@ -251,7 +286,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut DecodeState) {
 }
 
 /// Floating Protocol Decoding Table Window matching PicoScope 7 style.
-pub fn show_decode_table(ctx: &egui::Context, st: &mut DecodeState) {
+pub fn show_decode_table(ctx: &egui::Context, st: &mut DecodeState, traffic: &mut TrafficMonitor) {
     if !st.table_open {
         return;
     }
@@ -263,17 +298,17 @@ pub fn show_decode_table(ctx: &egui::Context, st: &mut DecodeState) {
 
     egui::Window::new(title)
         .open(&mut st.table_open)
-        .default_width(760.0)
-        .default_height(320.0)
+        .default_width(820.0)
+        .default_height(330.0)
         .resizable(true)
         .show(ctx, |ui| {
-            // Top Toolbar: Search filter, Export CSV, Clear
+            // Top Toolbar: Search filter, Export CSV, Link File
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("🔍 Buscar:").strong().size(11.0));
                 ui.add(
                     egui::TextEdit::singleline(&mut st.filter_text)
                         .hint_text("Filtrar por ID, datos hex, texto...")
-                        .desired_width(220.0),
+                        .desired_width(180.0),
                 );
                 if !st.filter_text.is_empty() && ui.button("✕").clicked() {
                     st.filter_text.clear();
@@ -301,6 +336,11 @@ pub fn show_decode_table(ctx: &egui::Context, st: &mut DecodeState) {
                     ui.ctx().copy_text(csv);
                 }
 
+                if ui.button("🔗 Link Auto Demo").on_hover_text("Cargar diccionario OBD-II / J1939 de ejemplo").clicked() {
+                    traffic.link_dict.load_csv_str("auto_demo.csv", LinkDictionary::sample_automotive_csv());
+                    traffic.refresh_descriptions();
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let valid_cnt = st.packets.iter().filter(|p| p.valid).count();
                     let total = st.packets.len();
@@ -320,6 +360,14 @@ pub fn show_decode_table(ctx: &egui::Context, st: &mut DecodeState) {
             ui.separator();
             ui.add_space(2.0);
 
+            let bus_kind = match st.protocol {
+                Protocol::CanFd => BusProtocol::CanFd,
+                Protocol::J1939 => BusProtocol::J1939,
+                Protocol::Lin => BusProtocol::Lin,
+                Protocol::Sent => BusProtocol::Sent,
+                _ => BusProtocol::Can,
+            };
+
             // Table Header & Rows
             egui::ScrollArea::both()
                 .max_height(ui.available_height() - 10.0)
@@ -329,13 +377,13 @@ pub fn show_decode_table(ctx: &egui::Context, st: &mut DecodeState) {
                         .min_col_width(50.0)
                         .spacing([12.0, 4.0])
                         .show(ui, |ui| {
-                            // Column Headers (PicoScope 7 standard)
                             ui.label(egui::RichText::new("#").strong().size(11.0).color(egui::Color32::LIGHT_BLUE));
                             ui.label(egui::RichText::new("Inicio").strong().size(11.0).color(egui::Color32::LIGHT_BLUE));
                             ui.label(egui::RichText::new("Fin").strong().size(11.0).color(egui::Color32::LIGHT_BLUE));
                             ui.label(egui::RichText::new("ID / PID").strong().size(11.0).color(egui::Color32::LIGHT_BLUE));
                             ui.label(egui::RichText::new("DLC").strong().size(11.0).color(egui::Color32::LIGHT_BLUE));
                             ui.label(egui::RichText::new("Datos (Hex)").strong().size(11.0).color(egui::Color32::LIGHT_BLUE));
+                            ui.label(egui::RichText::new("Señal / Link File").strong().size(11.0).color(egui::Color32::from_rgb(150, 235, 190)));
                             ui.label(egui::RichText::new("CRC / Chk").strong().size(11.0).color(egui::Color32::LIGHT_BLUE));
                             ui.label(egui::RichText::new("ACK").strong().size(11.0).color(egui::Color32::LIGHT_BLUE));
                             ui.label(egui::RichText::new("Estado").strong().size(11.0).color(egui::Color32::LIGHT_BLUE));
@@ -344,10 +392,13 @@ pub fn show_decode_table(ctx: &egui::Context, st: &mut DecodeState) {
                             let filter = st.filter_text.to_lowercase();
 
                             for p in &st.packets {
+                                let raw_id = u32::from_str_radix(p.id_or_pid.trim_start_matches("0x"), 16).unwrap_or(0);
+                                let link_desc = traffic.link_dict.describe(raw_id, p.is_extended, bus_kind, &p.data);
                                 if !filter.is_empty() {
                                     let matches = p.id_or_pid.to_lowercase().contains(&filter)
                                         || p.data_hex.to_lowercase().contains(&filter)
-                                        || p.crc_or_chk.to_lowercase().contains(&filter);
+                                        || p.crc_or_chk.to_lowercase().contains(&filter)
+                                        || link_desc.as_deref().unwrap_or("").to_lowercase().contains(&filter);
                                     if !matches {
                                         continue;
                                     }
@@ -380,6 +431,13 @@ pub fn show_decode_table(ctx: &egui::Context, st: &mut DecodeState) {
                                         .monospace()
                                         .size(10.5)
                                         .color(egui::Color32::from_rgb(110, 200, 255)),
+                                );
+
+                                // Link File / J1939 Signal
+                                ui.label(
+                                    egui::RichText::new(link_desc.as_deref().unwrap_or("-"))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(160, 235, 185)),
                                 );
 
                                 // CRC / Checksum (Purple)

@@ -1,4 +1,4 @@
-//! The settings dock: an always-visible right-side rail (the
+﻿//! The settings dock: an always-visible right-side rail (the
 //! Photoshop/Blender model). Sections expand independently and stay open
 //! (the rail scrolls on overflow); the `menu` script action opens a
 //! section exclusively so tests stay deterministic.
@@ -21,6 +21,8 @@ use crate::record::Recorder;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Menu {
+    More,
+    Annotations,
     Automotive,
     Channel(usize),
     Horizontal,
@@ -38,28 +40,32 @@ pub enum Menu {
 impl Menu {
     pub fn title(self) -> &'static str {
         match self {
+            Menu::More => "More... (Todas las Funciones)",
+            Menu::Annotations => "Anotaciones y Gráfica",
             Menu::Automotive => "🚗 Diagnóstico Automotriz",
             Menu::Channel(ch) => match ch {
-                0 => "Channel 1",
-                1 => "Channel 2",
+                0 => "Channel 1 (Canal A)",
+                1 => "Channel 2 (Canal B)",
                 _ => "Channel",
             },
-            Menu::Horizontal => "Horizontal",
-            Menu::Trigger => "Trigger",
-            Menu::Acquire => "Acquire",
-            Menu::Display => "Display",
-            Menu::Measure => "Measure",
-            Menu::Math => "Math",
-            Menu::Cursor => "Cursors",
-            Menu::Utility => "Utility",
-            Menu::Record => "Record / Export",
-            Menu::Decode => "🔢 Decodificador Serie / Bus (CAN/LIN)",
+            Menu::Horizontal => "Horizontal (Base de Tiempo)",
+            Menu::Trigger => "Trigger (Disparo)",
+            Menu::Acquire => "Acquire (Adquisición)",
+            Menu::Display => "Display & Referencias",
+            Menu::Measure => "Measurements (Mediciones)",
+            Menu::Math => "Math Channels (Matemáticas)",
+            Menu::Cursor => "Rulers (Reglas)",
+            Menu::Utility => "Masks & Actions (Máscaras)",
+            Menu::Record => "Buffer & Export (Grabación)",
+            Menu::Decode => "🔢 Serial Decode (CAN/LIN)",
         }
     }
 
     /// Stable name: the `layout` dump and the `dock` action share it.
     pub fn name(self) -> &'static str {
         match self {
+            Menu::More => "more",
+            Menu::Annotations => "annotations",
             Menu::Automotive => "automotive",
             Menu::Channel(0) => "channel0",
             Menu::Channel(1) => "channel1",
@@ -79,6 +85,8 @@ impl Menu {
 
     pub fn from_name(s: &str) -> Option<Self> {
         Some(match s {
+            "more" => Menu::More,
+            "annotations" => Menu::Annotations,
             "automotive" => Menu::Automotive,
             "channel0" => Menu::Channel(0),
             "channel1" => Menu::Channel(1),
@@ -112,51 +120,60 @@ pub struct MenuState {
 impl Default for MenuState {
     fn default() -> Self {
         Self {
-            open: vec![Menu::Automotive, Menu::Trigger],
+            open: Vec::new(),
             focus: None,
-            collapsed: false,
+            collapsed: true,
         }
     }
 }
 
 impl MenuState {
     pub fn is_collapsed(&self) -> bool {
-        self.collapsed
+        self.collapsed || self.open.is_empty()
     }
 
     pub fn set_collapsed(&mut self, val: bool) {
         self.collapsed = val;
+        if val {
+            self.open.clear();
+        }
     }
 
     pub fn toggle_collapsed(&mut self) {
         self.collapsed = !self.collapsed;
+        if !self.collapsed && self.open.is_empty() {
+            self.open.push(Menu::Cursor);
+        }
     }
 
     pub fn is_open(&self, m: Menu) -> bool {
-        self.open.contains(&m)
+        !self.collapsed && self.open.last() == Some(&m)
     }
 
     pub fn toggle(&mut self, m: Menu) {
-        if let Some(i) = self.open.iter().position(|&x| x == m) {
-            self.open.remove(i);
+        if !self.collapsed && self.open.last() == Some(&m) {
+            self.open.clear();
+            self.collapsed = true;
         } else {
-            self.open.push(m);
+            self.open = vec![m];
             self.focus = Some(m);
+            self.collapsed = false;
         }
     }
 
     pub fn reveal(&mut self, m: Menu) {
-        self.open(m);
+        self.open = vec![m];
         self.focus = Some(m);
+        self.collapsed = false;
     }
 
-    /// Expand a section (keeping others as they are).
+    /// Selecciona exclusivamente esta sección en la columna adyacente izquierda.
     pub fn open(&mut self, m: Menu) {
-        if !self.is_open(m) {
-            self.open.push(m);
-        }
+        self.open = vec![m];
+        self.collapsed = false;
     }
 
+    #[allow(dead_code)]
     fn take_focus(&mut self, m: Menu) -> bool {
         if self.focus == Some(m) {
             self.focus = None;
@@ -170,10 +187,12 @@ impl MenuState {
     /// so `layout` dumps stay deterministic.
     pub fn set_exclusive(&mut self, m: Option<Menu>) {
         self.open = m.into_iter().collect();
+        self.collapsed = self.open.is_empty();
     }
 
     pub fn set_open(&mut self, open: Vec<Menu>) {
         self.open = open;
+        self.collapsed = self.open.is_empty();
     }
 
     pub fn open_list(&self) -> &[Menu] {
@@ -181,8 +200,8 @@ impl MenuState {
     }
 }
 
-/// Draws the dock and returns the rect it actually painted into — the
-/// caller records it so tests can assert the rail never reaches the plot.
+/// Dibuja la columna secundaria adyacente a la derecha de la columna principal izquierda
+/// (Estilo PicoScope 7 — Imagen 2), mostrando exclusivamente las opciones del ítem seleccionado.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ctx: &egui::Context,
@@ -207,53 +226,21 @@ pub fn show(
     dec: &mut crate::decode::DecodeState,
     auto: &mut crate::ui::automotive_dock::AutomotiveUiState,
 ) -> egui::Rect {
-    if menus.collapsed {
-        let win_w = l.points(l.menu_bar).width();
-        let uncollapse_rect = egui::Rect::from_min_size(
-            egui::pos2(win_w - 76.0, l.points(l.menu_bar).bottom() + 6.0),
-            egui::vec2(70.0, 24.0),
-        );
-        let resp = egui::Area::new("dock_uncollapse".into())
-            .fixed_pos(uncollapse_rect.min)
-            .show(ctx, |ui| {
-                let btn = egui::Button::new(
-                    egui::RichText::new("◀ Panel")
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(220, 235, 255)),
-                )
-                .fill(egui::Color32::from_rgb(28, 34, 48))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 90, 120)));
-                if ui.add(btn).on_hover_text("Desplegar panel de control lateral").clicked() {
-                    menus.collapsed = false;
-                }
-            });
-        return l.pixels(resp.response.rect);
+    if menus.is_collapsed() {
+        return egui::Rect::NOTHING;
     }
+
+    let Some(active_menu) = menus.open.last().copied() else {
+        return egui::Rect::NOTHING;
+    };
 
     let rect = l.points(Roi::Dialog.rect(l));
     let mut frame = egui::Frame::new();
-    frame.fill = egui::Color32::from_rgb(12, 14, 18);
-    frame.stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(50));
-    frame.inner_margin = 6.0.into();
+    frame.fill = egui::Color32::from_rgb(14, 18, 26);
+    frame.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 64, 84));
+    frame.inner_margin = 0.0.into();
 
-    const SECTIONS: [Menu; 9] = [
-        Menu::Automotive,
-        Menu::Trigger,
-        Menu::Horizontal,
-        Menu::Acquire,
-        Menu::Math,
-        Menu::Measure,
-        Menu::Cursor,
-        Menu::Decode,
-        Menu::Display,
-    ];
-
-    // `constrain` is off and the clip rect is pinned to the dock: an Area
-    // that egui is allowed to constrain slides *left* over the plot as soon
-    // as its content is wider than the rail, which is how expanding a
-    // channel section came to cover the trigger marker. Content is clipped
-    // to the rail, so overflow can never reach the waveform.
+    let mut close_flyout = false;
     let resp = egui::Area::new("dock".into())
         .fixed_pos(rect.min)
         .constrain(false)
@@ -263,70 +250,98 @@ pub fn show(
             ui.set_min_width(rect.width());
             ui.set_max_height(rect.height());
             frame.show(ui, |ui| {
-                ui.set_min_height(rect.height() - 16.0);
-                // Scrolls in both axes: a section too wide for the rail
-                // scrolls (manual 7.6 — "scrollbar when overflowing")
-                // instead of spilling over the grid.
-                egui::ScrollArea::both()
-                    .max_height(rect.height() - 16.0)
-                    .max_width(rect.width() - 12.0)
+                ui.set_min_height(rect.height());
+
+                // Barra de encabezado superior celeste estilo PicoScope 7 (Imagen 2)
+                let hdr_h = 26.0;
+                let (hdr_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(rect.width(), hdr_h), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    hdr_rect,
+                    0.0,
+                    egui::Color32::from_rgb(86, 178, 245),
+                );
+                ui.painter().text(
+                    hdr_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    active_menu.title(),
+                    egui::FontId::proportional(12.5),
+                    egui::Color32::from_rgb(10, 18, 28),
+                );
+                let close_rect = egui::Rect::from_min_size(
+                    egui::pos2(hdr_rect.right() - 24.0, hdr_rect.top() + 2.0),
+                    egui::vec2(22.0, 22.0),
+                );
+                if ui
+                    .put(
+                        close_rect,
+                        egui::Button::new(
+                            egui::RichText::new("✕")
+                                .size(12.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(10, 18, 28)),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Cerrar columna adyacente de configuración")
+                    .clicked()
+                {
+                    close_flyout = true;
+                }
+
+                // Cuerpo desplazable con las opciones exclusivas del ítem seleccionado
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(8, 8))
                     .show(ui, |ui| {
-                        ui.set_max_width(rect.width() - 24.0);
-                        ui.set_min_width(rect.width() - 24.0);
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("PANEL DE CONTROL").strong().size(11.0).color(egui::Color32::from_gray(190)));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("✕ Minimizar").on_hover_text("Minimizar dock lateral para expandir cuadrícula al 100%").clicked() {
-                                    menus.collapsed = true;
-                                }
-                                if ui.button("⮟ Cerrar Todo").on_hover_text("Cerrar todas las secciones abiertas del dock").clicked() {
-                                    menus.set_open(Vec::new());
+                        egui::ScrollArea::vertical()
+                            .max_height(rect.height() - hdr_h - 16.0)
+                            .max_width(rect.width() - 16.0)
+                            .show(ui, |ui| {
+                                ui.set_max_width(rect.width() - 20.0);
+                                ui.set_min_width(rect.width() - 20.0);
+
+                                match active_menu {
+                                    Menu::Annotations => crate::ui::plot_tools::show_annotations_panel(ui, &mut auto.plot_tools, cur),
+                                    Menu::More => crate::ui::suite::show_more_tools_panel(
+                                        ui, link, math, menus, auto,
+                                    ),
+                                    Menu::Automotive => {
+                                        crate::ui::automotive_dock::show(ui, auto, link, rec, hist)
+                                    }
+                                    Menu::Channel(ch) => {
+                                        dialog_channel::show(ui, link, ch, auto)
+                                    }
+                                    Menu::Horizontal => {
+                                        dialog_horizontal::show(ui, link, phosphor, deep)
+                                    }
+                                    Menu::Trigger => dialog_trigger::show(ui, link, auto),
+                                    Menu::Acquire => dialog_acquire::show(ui, link, ap),
+                                    Menu::Display => dialog_display::show(
+                                        ui, link, phosphor, cur, refs, fft, wf, viz, fx, script,
+                                    ),
+                                    Menu::Measure => {
+                                        meas.window = true;
+                                        dialog_measure::show(ui, meas)
+                                    }
+                                    Menu::Math => dialog_math::show(ui, math),
+                                    Menu::Cursor => {
+                                        dialog_cursor::show(ui, link, cur, meas, deep, auto)
+                                    }
+                                    Menu::Decode => dialog_decode::show(ui, dec),
+                                    Menu::Record => {
+                                        dialog_record::show(ui, link, rec, hist, script)
+                                    }
+                                    Menu::Utility => {
+                                        dialog_utility::show(ui, link, math, pf, fft, script)
+                                    }
                                 }
                             });
-                        });
-                        ui.add_space(2.0);
-                        ui.separator();
-                        ui.add_space(2.0);
-
-                        // Si se abrió configuración detallada de un canal desde el riel izquierdo
-                        for ch in 0..2 {
-                            if menus.is_open(Menu::Channel(ch)) {
-                                section(ui, menus, Menu::Channel(ch), |ui, _| {
-                                    dialog_channel::show(ui, link, ch, &mut auto.dsp[ch]);
-                                });
-                            }
-                        }
-
-                        for m in SECTIONS {
-                            section(ui, menus, m, |ui, menus| match m {
-                                Menu::Automotive => crate::ui::automotive_dock::show(ui, auto, link, rec, hist),
-                                Menu::Channel(ch) => dialog_channel::show(ui, link, ch, &mut auto.dsp[ch]),
-                                Menu::Horizontal => {
-                                    dialog_horizontal::show(ui, link, phosphor, deep)
-                                }
-                                Menu::Trigger => dialog_trigger::show(ui, link),
-                                Menu::Acquire => dialog_acquire::show(ui, link, ap),
-                                Menu::Display => dialog_display::show(
-                                    ui, link, phosphor, cur, refs, fft, wf, viz, fx, script,
-                                ),
-                                Menu::Measure => dialog_measure::show(ui, meas),
-                                Menu::Math => dialog_math::show(ui, math),
-                                Menu::Cursor => dialog_cursor::show(ui, link, cur, meas, deep),
-                                Menu::Decode => dialog_decode::show(ui, dec),
-                                Menu::Utility | Menu::Record => {
-                                    let _ = menus;
-                                }
-                            });
-                        }
-                        section(ui, menus, Menu::Record, |ui, _| {
-                            dialog_record::show(ui, link, rec, hist, script)
-                        });
-                        section(ui, menus, Menu::Utility, |ui, _| {
-                            dialog_utility::show(ui, link, math, pf, fft, script)
-                        });
                     });
             });
         });
+    if close_flyout {
+        menus.set_collapsed(true);
+    }
     l.pixels(resp.response.rect)
 }
 

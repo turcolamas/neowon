@@ -107,6 +107,147 @@ pub fn chip(
     )
 }
 
+/// Tonalidad / Jerarquía visual unificada de botones para la suite (estilo PicoScope 7 / Keysight).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonTone {
+    Neutral,
+    Primary,
+    Success,
+    Danger,
+    Warning,
+    Ch1,
+    Ch2,
+    Custom(egui::Color32),
+}
+
+impl ButtonTone {
+    pub fn colors(&self, active: bool) -> (egui::Color32, egui::Color32, egui::Color32) {
+        match self {
+            ButtonTone::Success => {
+                if active {
+                    (
+                        egui::Color32::from_rgb(36, 135, 55),
+                        egui::Color32::from_rgb(75, 215, 110),
+                        egui::Color32::WHITE,
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgb(20, 38, 28),
+                        egui::Color32::from_rgb(45, 125, 70),
+                        egui::Color32::from_rgb(115, 245, 160),
+                    )
+                }
+            }
+            ButtonTone::Danger => {
+                if active {
+                    (
+                        egui::Color32::from_rgb(195, 38, 38),
+                        egui::Color32::from_rgb(255, 95, 95),
+                        egui::Color32::WHITE,
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgb(44, 22, 22),
+                        egui::Color32::from_rgb(180, 50, 50),
+                        egui::Color32::from_rgb(255, 115, 115),
+                    )
+                }
+            }
+            ButtonTone::Warning => {
+                if active {
+                    (
+                        egui::Color32::from_rgb(225, 165, 30),
+                        egui::Color32::from_rgb(255, 215, 75),
+                        egui::Color32::BLACK,
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgb(38, 32, 20),
+                        egui::Color32::from_rgb(195, 145, 40),
+                        egui::Color32::from_rgb(255, 210, 75),
+                    )
+                }
+            }
+            ButtonTone::Primary => {
+                if active {
+                    (
+                        egui::Color32::from_rgb(28, 115, 195),
+                        egui::Color32::from_rgb(90, 185, 255),
+                        egui::Color32::WHITE,
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgb(22, 34, 50),
+                        egui::Color32::from_rgb(60, 115, 185),
+                        egui::Color32::from_rgb(120, 200, 255),
+                    )
+                }
+            }
+            ButtonTone::Ch1 => {
+                if active {
+                    (CH1_COLOR, CH1_COLOR, egui::Color32::BLACK)
+                } else {
+                    (
+                        egui::Color32::from_rgb(38, 34, 20),
+                        egui::Color32::from_rgb(130, 115, 40),
+                        egui::Color32::from_rgb(210, 195, 110),
+                    )
+                }
+            }
+            ButtonTone::Ch2 => {
+                if active {
+                    (CH2_COLOR, CH2_COLOR, egui::Color32::BLACK)
+                } else {
+                    (
+                        egui::Color32::from_rgb(20, 36, 46),
+                        egui::Color32::from_rgb(45, 120, 160),
+                        egui::Color32::from_rgb(110, 195, 235),
+                    )
+                }
+            }
+            ButtonTone::Custom(color) => {
+                if active {
+                    (*color, *color, egui::Color32::BLACK)
+                } else {
+                    (egui::Color32::from_rgb(26, 32, 44), *color, *color)
+                }
+            }
+            ButtonTone::Neutral => {
+                if active {
+                    (
+                        egui::Color32::from_rgb(45, 60, 85),
+                        egui::Color32::from_rgb(105, 150, 215),
+                        egui::Color32::WHITE,
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgb(26, 32, 44),
+                        egui::Color32::from_rgb(52, 64, 82),
+                        egui::Color32::from_rgb(220, 230, 245),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Constructor unificado de botón profesional: esquinas redondeadas (4.0px),
+/// trazo fino definido (1.0px o 1.5px si activo) y jerarquía cromática por importancia.
+pub fn pro_button_widget(
+    label: impl Into<egui::WidgetText>,
+    tone: ButtonTone,
+    active: bool,
+    height: f32,
+) -> egui::Button<'static> {
+    let (fill, stroke_color, text_color) = tone.colors(active);
+    let stroke_width = if active { 1.5 } else { 1.0 };
+    egui::Button::new(label.into().color(text_color).strong())
+        .fill(fill)
+        .stroke(egui::Stroke::new(stroke_width, stroke_color))
+        .corner_radius(4.0)
+        .min_size(egui::vec2(0.0, height))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepperAction {
     None,
@@ -115,9 +256,9 @@ pub enum StepperAction {
     ClickedValue,
 }
 
-/// Control selector tipo pastilla unificada [◀ Valor ▶] ultra compacto.
+/// Control selector tipo pastilla unificada [- Valor +] ultra compacto.
 /// Ocupa exactamente el ancho disponible (sin desbordamiento), detecta clics en
-/// flechas o texto, y soporta rueda del ratón (scroll up = Next, scroll down = Prev).
+/// signos (- / +) o texto, y soporta rueda del ratón (scroll up = Next, scroll down = Prev).
 pub fn compact_stepper(
     ui: &mut egui::Ui,
     _id_salt: &str,
@@ -173,19 +314,19 @@ pub fn compact_stepper(
     } else {
         egui::Color32::from_rgb(45, 52, 65)
     };
-    painter.rect_filled(rect, 3.0, bg_color);
+    painter.rect_filled(rect, 4.0, bg_color);
 
     if is_hover_left {
-        painter.rect_filled(left_arrow_rect, 3.0, egui::Color32::from_rgb(38, 48, 64));
+        painter.rect_filled(left_arrow_rect, 4.0, egui::Color32::from_rgb(38, 48, 64));
     }
     if is_hover_right {
-        painter.rect_filled(right_arrow_rect, 3.0, egui::Color32::from_rgb(38, 48, 64));
+        painter.rect_filled(right_arrow_rect, 4.0, egui::Color32::from_rgb(38, 48, 64));
     }
     if is_hover_center {
         painter.rect_filled(center_rect, 0.0, egui::Color32::from_rgb(28, 33, 44));
     }
 
-    painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, border_color), egui::StrokeKind::Inside);
+    painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, border_color), egui::StrokeKind::Inside);
 
     let sep_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 52, 65));
     painter.line_segment([left_arrow_rect.right_top(), left_arrow_rect.right_bottom()], sep_stroke);
@@ -199,15 +340,15 @@ pub fn compact_stepper(
     painter.text(
         left_arrow_rect.center(),
         egui::Align2::CENTER_CENTER,
-        "◀",
-        egui::FontId::monospace(10.0),
+        "-",
+        egui::FontId::monospace(12.0),
         arrow_color,
     );
     painter.text(
         right_arrow_rect.center(),
         egui::Align2::CENTER_CENTER,
-        "▶",
-        egui::FontId::monospace(10.0),
+        "+",
+        egui::FontId::monospace(12.0),
         arrow_color,
     );
 

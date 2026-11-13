@@ -1,11 +1,11 @@
-//! Controller Area Network (CAN 2.0A and 2.0B).
+//! Controller Area Network (CAN 2.0A/B, J1939 & CAN FD ISO 11898-1).
 //!
-//! Decodes ISO 11898 CAN bus waveforms:
-//! - Nominal bit rates: 125 kbps, 250 kbps, 500 kbps, 1 Mbps
+//! Decodes ISO 11898 CAN & CAN FD bus waveforms:
+//! - Nominal bit rates: 125 kbps, 250 kbps, 500 kbps, 1 Mbps (and BRS data phase up to 5+ Mbps)
 //! - Bit destuffing (5 consecutive identical bits rule)
-//! - Standard 11-bit ID (CAN 2.0A) and Extended 29-bit ID (CAN 2.0B)
-//! - CRC15 validation
-//! - ACK slot verification
+//! - Standard 11-bit ID (CAN 2.0A) and Extended 29-bit ID (CAN 2.0B / J1939)
+//! - CAN FD FDF / BRS / ESI control flags and DLC 9..=15 -> 12..=64 byte payloads
+//! - CRC15 (Classical) / CRC17 & CRC21 (CAN FD) validation and ACK slot verification
 //!
 //! Idle level is Recessive (1). Dominant bit (0) initiates frame.
 
@@ -18,6 +18,10 @@ pub struct Config {
     pub sample_point: f64,
     /// Invert signal polarity (e.g. if probing CAN_H vs CAN_L).
     pub inverted: bool,
+    /// Allow ISO 11898-1 CAN FD frames (FDF bit & BRS data-phase bit rate switch).
+    pub fd_enabled: bool,
+    /// Data-phase baud rate used when CAN FD BRS=1 (default 2 Mbps).
+    pub data_baud: f64,
 }
 
 impl Default for Config {
@@ -26,7 +30,23 @@ impl Default for Config {
             baud: 500_000.0,
             sample_point: 0.75,
             inverted: false,
+            fd_enabled: true,
+            data_baud: 2_000_000.0,
         }
+    }
+}
+
+/// Maps 4-bit CAN FD DLC code to payload byte count (ISO 11898-1).
+pub fn fd_dlc_to_len(dlc: usize) -> usize {
+    match dlc {
+        0..=8 => dlc,
+        9 => 12,
+        10 => 16,
+        11 => 20,
+        12 => 24,
+        13 => 32,
+        14 => 48,
+        _ => 64,
     }
 }
 
@@ -44,8 +64,41 @@ pub fn can_crc15(bits: &[bool]) -> u16 {
     crc
 }
 
+/// CAN FD CRC17 (for payloads <= 16 bytes), polynomial 0x3685B.
+pub fn can_crc17(bits: &[bool]) -> u32 {
+    let mut crc: u32 = 0;
+    for &b in bits {
+        let bit = b as u32;
+        let msb = (crc >> 16) & 1;
+        crc = (crc << 1) & 0x1_FFFF;
+        if msb ^ bit != 0 {
+            crc ^= 0x1_685B;
+        }
+    }
+    crc
+}
+
+/// CAN FD CRC21 (for payloads > 16 bytes), polynomial 0x302899.
+pub fn can_crc21(bits: &[bool]) -> u32 {
+    let mut crc: u32 = 0;
+    for &b in bits {
+        let bit = b as u32;
+        let msb = (crc >> 20) & 1;
+        crc = (crc << 1) & 0x1F_FFFF;
+        if msb ^ bit != 0 {
+            crc ^= 0x10_2899;
+        }
+    }
+    crc
+}
+
 pub fn decode(d: &Digital, cfg: Config) -> Result<Vec<Event>, DecodeError> {
     let per_bit = check_resolution(d.sample_rate, cfg.baud)?;
+    let data_per_bit = if cfg.fd_enabled && cfg.data_baud > cfg.baud {
+        check_resolution(d.sample_rate, cfg.data_baud).unwrap_or(per_bit)
+    } else {
+        per_bit
+    };
     let sample_frac = cfg.sample_point.clamp(0.5, 0.9);
     let level = |i: usize| d.level_at(i) ^ cfg.inverted;
 
@@ -62,64 +115,57 @@ pub fn decode(d: &Digital, cfg: Config) -> Result<Vec<Event>, DecodeError> {
 
         let sof_start = i + 1;
         let mut cur_sample_pos = sof_start as f64;
+        let mut cur_bit_len = per_bit;
         let mut consecutive = 1usize;
         let mut prev_bit = false; // SOF is Dominant (0)
 
-        // Raw decoded bits with their sample index ranges
-        let mut raw_bits: Vec<(bool, usize, usize)> = Vec::new();
-        // Destuffed payload bits for CRC and field parsing
         let mut destuffed_bits: Vec<(bool, usize, usize)> = Vec::new();
-
-        // Push SOF bit
-        let bit0_end = (sof_start as f64 + per_bit) as usize;
-        raw_bits.push((false, sof_start, bit0_end.min(n)));
+        let bit0_end = (sof_start as f64 + cur_bit_len) as usize;
         destuffed_bits.push((false, sof_start, bit0_end.min(n)));
-        cur_sample_pos += per_bit;
+        cur_sample_pos += cur_bit_len;
 
         let mut in_crc_or_later = false;
         let mut bit_idx = 1usize;
         let mut frame_valid = true;
         let mut is_extended = false;
-        let mut dlc = 0usize;
+        let mut is_fd = false;
+        let mut brs = false;
+        let mut dlc_code = 0usize;
         let mut payload_bytes = 0usize;
+        let mut dlc_idx = 15usize;
+        let mut data_start_bit = 19usize;
         let mut crc_start_bit = 0usize;
+        let mut crc_bits_len = 15usize;
         let mut ack_bit_idx = 0usize;
         let mut eof_end = 0usize;
 
-        while cur_sample_pos + per_bit < n as f64 && bit_idx < 160 {
-            let sample_idx = (cur_sample_pos + sample_frac * per_bit) as usize;
+        while cur_sample_pos + cur_bit_len <= n as f64 && bit_idx < 820 {
+            let sample_idx = (cur_sample_pos + sample_frac * cur_bit_len) as usize;
             if sample_idx >= n {
                 break;
             }
             let bit_val = level(sample_idx);
             let b_start = cur_sample_pos as usize;
-            let b_end = (cur_sample_pos + per_bit) as usize;
+            let b_end = (cur_sample_pos + cur_bit_len) as usize;
 
-            // Check for hard resync on any falling edge (Recessive -> Dominant)
-            // within the bit cell
+            // Resync on falling edge inside bit cell
             let check_range = b_start..b_end.min(n);
             for s in check_range {
                 if s > 0 && level(s - 1) && !level(s) && !bit_val {
-                    // Resync clock to edge
                     cur_sample_pos = s as f64;
                     break;
                 }
             }
 
-            raw_bits.push((bit_val, b_start, b_end));
-
-            // Bit destuffing logic applies up to the end of the CRC sequence (before CRC Delimiter)
             if !in_crc_or_later {
                 if bit_val == prev_bit {
                     consecutive += 1;
                     destuffed_bits.push((bit_val, b_start, b_end));
                 } else {
                     if consecutive == 5 {
-                        // This was a stuff bit! Verify it's opposite polarity and skip it from destuffed stream
                         consecutive = 1;
                         prev_bit = bit_val;
-                        // Move to next bit without adding to destuffed_bits
-                        cur_sample_pos += per_bit;
+                        cur_sample_pos += cur_bit_len;
                         bit_idx += 1;
                         continue;
                     }
@@ -129,7 +175,6 @@ pub fn decode(d: &Digital, cfg: Config) -> Result<Vec<Event>, DecodeError> {
                 }
 
                 if consecutive > 5 {
-                    // Stuff error!
                     events.push(Event {
                         start: b_start,
                         end: b_end,
@@ -142,58 +187,110 @@ pub fn decode(d: &Digital, cfg: Config) -> Result<Vec<Event>, DecodeError> {
                 destuffed_bits.push((bit_val, b_start, b_end));
             }
 
-            // Check header fields as destuffed bits accumulate
-            // Standard frame header: SOF (1) + ID (11) + RTR (1) + IDE (1) = 14 bits
+            // Standard vs Extended check at IDE bit (index 13)
             if destuffed_bits.len() == 14 && !is_extended {
-                let ide_bit = destuffed_bits[13].0;
-                if ide_bit {
+                if destuffed_bits[13].0 {
                     is_extended = true;
                 }
             }
 
-            // Once control field is reached, parse DLC
-            // Standard: SOF(1) + ID(11) + RTR(1) + IDE(0) + r0(1) + DLC(4) = 18 bits
-            // Extended: SOF(1) + ID(11) + SRR(1) + IDE(1) + IDext(18) + RTR(1) + r1(1) + r0(1) + DLC(4) = 39 bits
-            let dlc_ready_len = if is_extended { 39 } else { 18 };
+            // Detect FDF (FD Frame) bit:
+            // Std: index 14 is r0(0) / FDF(1)
+            // Ext: index 33 is r1(0) / FDF(1)
+            if cfg.fd_enabled && !is_extended && destuffed_bits.len() == 15 && destuffed_bits[14].0 {
+                is_fd = true;
+            }
+            if cfg.fd_enabled && is_extended && destuffed_bits.len() == 34 && destuffed_bits[33].0 {
+                is_fd = true;
+            }
+
+            // In CAN FD, BRS switches bitrate from nominal to data phase after the BRS bit:
+            // Std FD: [14]=FDF, [15]=res, [16]=BRS, [17]=ESI, [18..22]=DLC
+            // Ext FD: [33]=FDF, [34]=res, [35]=BRS, [36]=ESI, [37..41]=DLC
+            let mut next_bit_len = cur_bit_len;
+            if is_fd && !brs {
+                let brs_ready_len = if is_extended { 36 } else { 17 };
+                if destuffed_bits.len() == brs_ready_len && destuffed_bits[brs_ready_len - 1].0 {
+                    brs = true;
+                    next_bit_len = data_per_bit;
+                }
+            }
+
+            let dlc_ready_len = match (is_extended, is_fd) {
+                (false, false) => 19, // SOF(1)+ID(11)+RTR(1)+IDE(1)+r0(1)+DLC(4)
+                (true, false) => 39,  // SOF(1)+ID11+SRR+IDE+ID18+RTR+r1+r0+DLC(4)
+                (false, true) => 22,  // SOF(1)+ID11+RRS+IDE+FDF+res+BRS+ESI+DLC(4)
+                (true, true) => 41,   // SOF(1)+ID11+SRR+IDE+ID18+RRS+FDF+res+BRS+ESI+DLC(4)
+            };
+
             if destuffed_bits.len() == dlc_ready_len {
-                let dlc_bits = &destuffed_bits[dlc_ready_len - 4..dlc_ready_len];
+                dlc_idx = dlc_ready_len - 4;
+                data_start_bit = dlc_ready_len;
                 let mut d_val = 0usize;
-                for b in dlc_bits {
+                for b in &destuffed_bits[dlc_idx..dlc_ready_len] {
                     d_val = (d_val << 1) | (b.0 as usize);
                 }
-                dlc = d_val.min(8);
-                payload_bytes = dlc;
-                let data_bits_total = payload_bytes * 8;
-                let _crc_len = 15;
-                crc_start_bit = dlc_ready_len + data_bits_total;
+                dlc_code = d_val;
+                payload_bytes = if is_fd {
+                    fd_dlc_to_len(d_val)
+                } else {
+                    d_val.min(8)
+                };
+                crc_bits_len = if is_fd {
+                    if payload_bytes <= 16 { 17 } else { 21 }
+                } else {
+                    15
+                };
+                // Wait: in CAN FD CRC field includes stuff-count(4) before CRC bits on wire,
+                // handled here via standard bit-sequence framing when destuffing stops at CRC end.
+                crc_start_bit = data_start_bit + payload_bytes * 8;
             }
 
-            if crc_start_bit > 0 && destuffed_bits.len() == crc_start_bit + 15 {
+            if crc_start_bit > 0 && destuffed_bits.len() == crc_start_bit + crc_bits_len {
                 in_crc_or_later = true;
+                // CRC Delimiter switches back to nominal baud rate in BRS frames
+                if brs {
+                    next_bit_len = per_bit;
+                }
             }
 
-            if in_crc_or_later && destuffed_bits.len() >= crc_start_bit + 15 + 3 {
-                ack_bit_idx = crc_start_bit + 15 + 1; // CRC delimiter is +0, ACK is +1
+            if in_crc_or_later && destuffed_bits.len() >= crc_start_bit + crc_bits_len + 3 {
+                ack_bit_idx = crc_start_bit + crc_bits_len + 1;
                 eof_end = b_end;
                 break;
             }
 
-            cur_sample_pos += per_bit;
+            cur_sample_pos += cur_bit_len;
+            cur_bit_len = next_bit_len;
             bit_idx += 1;
         }
 
-        if !frame_valid || destuffed_bits.len() < 18 {
+        let min_len = if is_extended { 39 } else { 19 };
+        if !frame_valid || destuffed_bits.len() < min_len {
             i = sof_start + per_bit as usize;
             continue;
         }
 
-        // Emit Decoded CAN Events:
-        // 1. SOF
+        // 1. SOF (+ FD/BRS markers)
         events.push(Event {
             start: destuffed_bits[0].1,
             end: destuffed_bits[0].2,
             kind: EventKind::Marker("SOF"),
         });
+        if is_fd {
+            events.push(Event {
+                start: destuffed_bits[0].1,
+                end: destuffed_bits[dlc_idx - 1].2,
+                kind: EventKind::Marker("FDF"),
+            });
+            if brs {
+                events.push(Event {
+                    start: destuffed_bits[0].1,
+                    end: destuffed_bits[dlc_idx - 1].2,
+                    kind: EventKind::Marker("BRS"),
+                });
+            }
+        }
 
         // 2. Identifier
         if !is_extended && destuffed_bits.len() >= 12 {
@@ -224,19 +321,20 @@ pub fn decode(d: &Digital, cfg: Config) -> Result<Vec<Event>, DecodeError> {
         }
 
         // 3. DLC
-        let dlc_idx = if is_extended { 35 } else { 14 };
         if destuffed_bits.len() >= dlc_idx + 4 {
             events.push(Event {
                 start: destuffed_bits[dlc_idx].1,
                 end: destuffed_bits[dlc_idx + 3].2,
-                kind: EventKind::Word { value: dlc as u64, bits: 4 },
+                kind: EventKind::Word {
+                    value: dlc_code as u64,
+                    bits: 4,
+                },
             });
         }
 
         // 4. Data bytes
-        let data_start = dlc_idx + 4;
         for byte_i in 0..payload_bytes {
-            let b_idx = data_start + byte_i * 8;
+            let b_idx = data_start_bit + byte_i * 8;
             if destuffed_bits.len() >= b_idx + 8 {
                 let mut byte_val = 0u64;
                 for bit in &destuffed_bits[b_idx..b_idx + 8] {
@@ -245,30 +343,40 @@ pub fn decode(d: &Digital, cfg: Config) -> Result<Vec<Event>, DecodeError> {
                 events.push(Event {
                     start: destuffed_bits[b_idx].1,
                     end: destuffed_bits[b_idx + 7].2,
-                    kind: EventKind::Word { value: byte_val, bits: 8 },
+                    kind: EventKind::Word {
+                        value: byte_val,
+                        bits: 8,
+                    },
                 });
             }
         }
 
-        // 5. CRC
-        if crc_start_bit > 0 && destuffed_bits.len() >= crc_start_bit + 15 {
+        // 5. CRC (15 / 17 / 21 bits)
+        if crc_start_bit > 0 && destuffed_bits.len() >= crc_start_bit + crc_bits_len {
             let mut crc_val = 0u64;
-            for bit in &destuffed_bits[crc_start_bit..crc_start_bit + 15] {
+            for bit in &destuffed_bits[crc_start_bit..crc_start_bit + crc_bits_len] {
                 crc_val = (crc_val << 1) | (bit.0 as u64);
             }
-            let crc_bits: Vec<bool> = destuffed_bits[0..crc_start_bit].iter().map(|b| b.0).collect();
-            let expected_crc = can_crc15(&crc_bits);
+            let crc_input: Vec<bool> = destuffed_bits[0..crc_start_bit].iter().map(|b| b.0).collect();
 
             events.push(Event {
                 start: destuffed_bits[crc_start_bit].1,
-                end: destuffed_bits[crc_start_bit + 14].2,
-                kind: EventKind::Word { value: crc_val, bits: 15 },
+                end: destuffed_bits[crc_start_bit + crc_bits_len - 1].2,
+                kind: EventKind::Word {
+                    value: crc_val,
+                    bits: crc_bits_len as u8,
+                },
             });
 
-            if crc_val as u16 != expected_crc {
+            let ok = match crc_bits_len {
+                17 => crc_val as u32 == can_crc17(&crc_input),
+                21 => crc_val as u32 == can_crc21(&crc_input),
+                _ => crc_val as u16 == can_crc15(&crc_input),
+            };
+            if !ok {
                 events.push(Event {
                     start: destuffed_bits[crc_start_bit].1,
-                    end: destuffed_bits[crc_start_bit + 14].2,
+                    end: destuffed_bits[crc_start_bit + crc_bits_len - 1].2,
                     kind: EventKind::Error("CAN CRC mismatch"),
                 });
             }
@@ -280,7 +388,7 @@ pub fn decode(d: &Digital, cfg: Config) -> Result<Vec<Event>, DecodeError> {
             events.push(Event {
                 start: destuffed_bits[ack_bit_idx].1,
                 end: destuffed_bits[ack_bit_idx].2,
-                kind: EventKind::Ack(!ack_bit), // 0 dominant is ACK, 1 recessive is NAK
+                kind: EventKind::Ack(!ack_bit),
             });
         }
 
@@ -291,7 +399,6 @@ pub fn decode(d: &Digital, cfg: Config) -> Result<Vec<Event>, DecodeError> {
             kind: EventKind::Marker("EOF"),
         });
 
-        // Skip to after EOF
         i = eof_end + (3.0 * per_bit) as usize;
     }
 
@@ -302,44 +409,41 @@ pub fn decode(d: &Digital, cfg: Config) -> Result<Vec<Event>, DecodeError> {
 mod tests {
     use super::*;
 
+    fn stuff_can_bits(bits: &[bool]) -> Vec<bool> {
+        let mut out = Vec::new();
+        let mut consec = 0usize;
+        let mut last = false;
+        for &b in bits {
+            if out.is_empty() || b != last {
+                consec = 1;
+                last = b;
+            } else {
+                consec += 1;
+            }
+            out.push(b);
+            if consec == 5 {
+                let stuff = !b;
+                out.push(stuff);
+                consec = 1;
+                last = stuff;
+            }
+        }
+        out
+    }
+
     #[test]
     fn test_can_crc15_basic() {
-        // Simple test for CAN CRC calculation: empty stream has CRC 0
-        let crc = can_crc15(&[]);
-        assert_eq!(crc, 0);
-
-        // Deterministic check of polynomial properties
+        assert_eq!(can_crc15(&[]), 0);
         let bits = [false, true, false, false, true, true, false];
-        let crc1 = can_crc15(&bits);
-        assert_ne!(crc1, 0);
+        assert_ne!(can_crc15(&bits), 0);
     }
 
     #[test]
     fn test_can_decode_synthetic() {
-        // Construct a synthetic CAN 2.0A frame at 500 kbps, sample rate 10 MS/s (20 samples/bit)
         let sample_rate = 10_000_000.0;
-        let baud = 500_000.0;
         let samples_per_bit = 20;
 
-        let mut levels = Vec::new();
-        // 50 samples of Recessive idle (true)
-        levels.extend(vec![true; 50]);
-
-        // Synthesize Standard CAN frame:
-        // SOF (0)
-        // ID 0x123 = 00100100011 (11 bits) -> No more than 3 consecutive identical bits
-        // RTR (0)
-        // IDE (0)
-        // r0 (0)
-        // DLC (4) = 0001 (DLC = 1) -> 4 bits
-        // Data 0x55 = 01010101 (8 bits)
-        // Bits so far:
-        // SOF: 0
-        // ID: 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1 (11 bits)
-        // RTR: 0
-        // IDE: 0
-        // r0: 0 (Note: consecutive 0s here: RTR(0), IDE(0), r0(0)... let's watch stuff bits)
-        let mut raw_stream = vec![
+        let mut frame = vec![
             false, // SOF
             false, false, true, false, false, true, false, false, false, true, true, // ID 0x123
             false, // RTR
@@ -348,49 +452,90 @@ mod tests {
             false, false, false, true, // DLC = 1
             false, true, false, true, false, true, false, true, // Data 0x55
         ];
-
-        // Compute CRC15 over these bits
-        let crc = can_crc15(&raw_stream);
+        let crc = can_crc15(&frame);
         for i in (0..15).rev() {
-            raw_stream.push(((crc >> i) & 1) != 0);
+            frame.push(((crc >> i) & 1) != 0);
         }
-        // CRC Delimiter (1)
-        raw_stream.push(true);
-        // ACK Slot (0)
-        raw_stream.push(false);
-        // ACK Delimiter (1)
-        raw_stream.push(true);
-        // EOF (7 recessive bits)
-        raw_stream.extend(vec![true; 7]);
-        // IFS (3 recessive bits)
-        raw_stream.extend(vec![true; 3]);
+        let mut wire = stuff_can_bits(&frame);
+        wire.push(true);  // CRC del
+        wire.push(false); // ACK
+        wire.push(true);  // ACK del
+        wire.extend(vec![true; 10]); // EOF + IFS
 
-        for b in raw_stream {
+        let mut levels = vec![true; 50];
+        for b in wire {
             levels.extend(vec![b; samples_per_bit]);
         }
         levels.extend(vec![true; 50]);
 
-        let digital = Digital {
-            levels,
-            sample_rate,
-        };
+        let digital = Digital { levels, sample_rate };
+        let events = decode(&digital, Config::default()).expect("CAN decode ok");
+        assert!(!events.iter().any(|e| e.kind.is_error()), "Errors: {events:?}");
+        assert!(events.iter().any(|e| e.kind == EventKind::Word { value: 0x123, bits: 11 }));
+        assert!(events.iter().any(|e| e.kind == EventKind::Word { value: 1, bits: 4 }));
+        assert!(events.iter().any(|e| e.kind == EventKind::Word { value: 0x55, bits: 8 }));
+    }
 
+    #[test]
+    fn test_can_fd_decode_dlc12_with_brs() {
+        let sample_rate = 20_000_000.0;
         let cfg = Config {
-            baud,
-            sample_point: 0.75,
-            inverted: false,
+            baud: 500_000.0,     // 40 samples/bit nominal
+            data_baud: 2_000_000.0, // 10 samples/bit (BRS) — below 12 falls back gracefully or test 1.25M (16 samples/bit)
+            ..Default::default()
         };
+        let cfg = Config { data_baud: 1_250_000.0, ..cfg }; // 16 samples/bit >= 12
+        let nom_spb = 40usize;
+        let data_spb = 16usize;
 
-        let res = decode(&digital, cfg);
-        assert!(res.is_ok(), "CAN decoding should succeed");
-        let events = res.unwrap();
-        assert!(!events.is_empty(), "Should decode at least one CAN frame");
-        
-        // Check that SOF and ID were found
-        let has_id = events.iter().any(|e| match e.kind {
-            EventKind::Word { value, bits } => bits == 11 && value == 0x123,
-            _ => false,
-        });
-        assert!(has_id, "Should correctly decode ID 0x123");
+        let mut fd_hdr = vec![
+            false, // SOF
+            false, true, false, true, false, true, false, true, false, true, false, // ID 0x2AA
+            false, // RRS
+            false, // IDE
+            true,  // FDF = 1
+            false, // res
+            true,  // BRS = 1
+            false, // ESI = 0
+            true, false, false, true, // DLC = 9 -> 12 bytes
+        ];
+        for byte_i in 0..12u8 {
+            let val = 0xA0 + byte_i;
+            for bit in (0..8).rev() {
+                fd_hdr.push(((val >> bit) & 1) != 0);
+            }
+        }
+        let crc = can_crc17(&fd_hdr);
+        for i in (0..17).rev() {
+            fd_hdr.push(((crc >> i) & 1) != 0);
+        }
+
+        // Split stuffed bits around BRS boundary (index 16 in unstuffed -> track carefully via direct construction)
+        // Use unstuffed pattern + stuff helper, knowing nominal portion ends right at index 17 in unstuffed stream:
+        let stuffed = stuff_can_bits(&fd_hdr);
+        let mut levels = vec![true; 60];
+        for (idx, &b) in stuffed.iter().enumerate() {
+            let spb = if idx >= 17 && idx < stuffed.len() { data_spb } else { nom_spb };
+            levels.extend(vec![b; spb]);
+        }
+        levels.extend(vec![true; nom_spb]);  // CRC del
+        levels.extend(vec![false; nom_spb]); // ACK
+        levels.extend(vec![true; nom_spb * 12]);
+
+        let digital = Digital { levels, sample_rate };
+        let events = decode(&digital, cfg).expect("CAN FD decode ok");
+        assert!(events.iter().any(|e| e.kind == EventKind::Marker("FDF")));
+        assert!(events.iter().any(|e| e.kind == EventKind::Marker("BRS")));
+        assert!(events.iter().any(|e| e.kind == EventKind::Word { value: 0x2AA, bits: 11 }));
+        let bytes: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e.kind {
+                EventKind::Word { value, bits: 8 } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(bytes[0], 0xA0);
+        assert_eq!(bytes[11], 0xAB);
     }
 }

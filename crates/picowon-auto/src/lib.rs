@@ -13,8 +13,10 @@ pub mod crank720;
 pub mod datalogger;
 pub mod dsp_filter;
 pub mod presets;
+pub mod probes;
 pub mod scope_persistence;
 pub mod traffic;
+pub mod trigger_qualifier;
 pub mod vi_tracer;
 
 pub use actuator::{ActuatorAnalysisState, ActuatorPreset, ActuatorTransferPoint};
@@ -34,12 +36,21 @@ pub use datalogger::{
 };
 pub use dsp_filter::{
     AUTOMOTIVE_LPF_PRESETS, ChannelDspConfig, LpfAlgorithm, RES_ENHANCE_PRESETS,
-    apply_channel_dsp, bilateral_edge_preserving_filter, gaussian_low_pass, low_pass_filtfilt,
-    resolution_enhance, savitzky_golay_filter,
+    apply_channel_dsp, bilateral_edge_preserving_filter, effective_lpf_cutoff_hz,
+    gaussian_low_pass, low_pass_filtfilt, res_enhance_effective_bandwidth_hz, resolution_enhance,
+    savitzky_golay_filter,
 };
 pub use presets::{AutomotivePreset, ChannelPreset, PresetCategory, TriggerPreset, get_all_presets};
+pub use probes::{
+    ChannelExtendedState, CustomProbeStore, PhysicalUnit, ProbeCategory, ProbeSpec,
+    SAFE_AUTO_VDIV_STEPS, ScalingMethod, builtin_automotive_probes, compute_safe_auto_vdiv,
+};
 pub use scope_persistence::{SavedChannelConfig, ScopePersistenceStore, StartupSafetyManager};
 pub use traffic::{BusProtocol, BusTrafficRow, TrafficMonitor};
+pub use trigger_qualifier::{
+    AdvancedTriggerMode, LogicCombinator, TriggerQualificationResult, TriggerQualifierConfig,
+    TriggerQualifierRuntime, evaluate_trigger_qualifier, shift_samples_to_trigger,
+};
 pub use vi_tracer::{
     ComponentSignature, EquivalentCircuit, PatternMatch, TracerEquipment, TracerEquipmentStore,
     ViTracerPreset, ViTracerState,
@@ -52,17 +63,12 @@ mod tests {
     #[test]
     fn test_presets_count_and_categories() {
         let presets = get_all_presets();
-        assert!(presets.len() >= 10, "Deben existir al menos 10 presets automotrices");
-        
-        let has_ignition = presets.iter().any(|p| p.category == PresetCategory::Ignition);
-        let has_injection = presets.iter().any(|p| p.category == PresetCategory::Injection);
-        let has_sensors = presets.iter().any(|p| p.category == PresetCategory::Sensors);
-        let has_can = presets.iter().any(|p| p.category == PresetCategory::Networks);
+        assert!(presets.len() >= 15, "Deben existir al menos 15 presets automotrices en las 9 familias");
 
-        assert!(has_ignition, "Falta preset de ignición");
-        assert!(has_injection, "Falta preset de inyección");
-        assert!(has_sensors, "Falta preset de sensores");
-        assert!(has_can, "Falta preset de CAN Bus");
+        for cat in PresetCategory::ALL {
+            let has_cat = presets.iter().any(|p| p.category == cat);
+            assert!(has_cat, "Falta cubrir la categoría {:?}", cat);
+        }
     }
 
     #[test]

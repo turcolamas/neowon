@@ -413,6 +413,18 @@ impl Vds1022 {
         level_volts: f64,
         sweep: Sweep,
     ) -> Result<()> {
+        self.set_trigger_with_hysteresis(ch, kind, level_volts, sweep, 4.0)
+    }
+
+    /// Trigger from a channel source with programmable hardware hysteresis (% of full scale).
+    pub fn set_trigger_with_hysteresis(
+        &mut self,
+        ch: usize,
+        kind: &TriggerKind,
+        level_volts: f64,
+        sweep: Sweep,
+        hysteresis_pct: f32,
+    ) -> Result<()> {
         assert!(ch < 2);
         let setup = self.channels[ch];
         let range = consts::full_scale_volts(setup.vb) * setup.probe;
@@ -428,7 +440,7 @@ impl Vds1022 {
 
         match kind {
             TriggerKind::Edge { slope } => {
-                self.write_level_pair(ch, to_raw(level_volts), *slope)?;
+                self.write_level_pair(ch, to_raw(level_volts), *slope, hysteresis_pct)?;
             }
             TriggerKind::Pulse { condition, width } => {
                 // Pulse level lives in the edge level registers. The level
@@ -439,7 +451,7 @@ impl Vds1022 {
                     0..=2 => Slope::Rising,
                     _ => Slope::Falling,
                 };
-                self.write_level_pair(ch, to_raw(level_volts), slope)?;
+                self.write_level_pair(ch, to_raw(level_volts), slope, hysteresis_pct)?;
                 let (gl, hl) = width_split(*width);
                 self.send(width_gl_reg(ch), 2, gl as u32)?;
                 self.send(width_hl_reg(ch), 2, hl as u32)?;
@@ -468,20 +480,16 @@ impl Vds1022 {
         Ok(())
     }
 
-    /// Edge/pulse level pair with 10-LSB hysteresis, plus the
-    /// frequency-meter reference just below the level.
-    fn write_level_pair(&mut self, ch: usize, level: i32, slope: Slope) -> Result<()> {
-        let (hi, lo) = match slope {
-            Slope::Rising => {
-                let hi = level.min(127);
-                (hi, (hi - 10).max(-128))
-            }
-            Slope::Falling => {
-                let lo = level.max(-128);
-                ((lo + 10).min(127), lo)
-            }
-        };
-        let val = ((hi as i8 as u8) as u32) | (((lo as i8 as u8) as u32) << 8);
+    /// Edge/pulse level pair with programmable hysteresis (% of 250-count full scale),
+    /// plus the frequency-meter reference just below the level.
+    fn write_level_pair(
+        &mut self,
+        ch: usize,
+        level: i32,
+        slope: Slope,
+        hysteresis_pct: f32,
+    ) -> Result<()> {
+        let val = level_pair_word(level, slope, hysteresis_pct);
         self.send(edge_level_reg(ch), 2, val)?;
         self.send(freqref_reg(ch), 1, ((level - 5) as i8 as u8) as u32)?;
         Ok(())
@@ -735,6 +743,24 @@ fn slope_thred_word(upper: i32, lower: i32) -> u32 {
     ((upper as i8 as u8) as u32) | (((lower as i8 as u8) as u32) << 8)
 }
 
+/// Edge/pulse threshold pair packing with programmable hysteresis (% of 250-count full scale).
+pub fn level_pair_word(level: i32, slope: Slope, hysteresis_pct: f32) -> u32 {
+    let hyst_lsb = ((hysteresis_pct.clamp(0.5, 20.0) / 100.0) * 250.0)
+        .round()
+        .clamp(2.0, 50.0) as i32;
+    let (hi, lo) = match slope {
+        Slope::Rising => {
+            let hi = level.min(127);
+            (hi, (hi - hyst_lsb).max(-128))
+        }
+        Slope::Falling => {
+            let lo = level.max(-128);
+            ((lo + hyst_lsb).min(127), lo)
+        }
+    };
+    ((hi as i8 as u8) as u32) | (((lo as i8 as u8) as u32) << 8)
+}
+
 /// Holdoff wire encoding: `d = seconds * 1e8` (units of 10 ns), divided by 10
 /// until it fits 10 bits, exponent in the low 3 bits, then byte-swapped.
 fn holdoff_arg(seconds: f64) -> u32 {
@@ -880,5 +906,16 @@ mod tests {
     fn slope_thred_packing() {
         // upper 50, lower -30 -> 0x32 | (0xE2 << 8).
         assert_eq!(slope_thred_word(50, -30), 0x32 | (0xE2 << 8));
+    }
+
+    #[test]
+    fn programmable_hysteresis_level_pair() {
+        // 4.0% of 250 counts = 10 LSBs (legacy default)
+        let w4 = level_pair_word(20, Slope::Rising, 4.0);
+        assert_eq!(w4, 20u32 | (10u32 << 8));
+        // 10.0% of 250 counts = 25 LSBs (high noise rejection)
+        let w10 = level_pair_word(20, Slope::Rising, 10.0);
+        let expected_lo = (-5i8 as u8) as u32;
+        assert_eq!(w10, 20u32 | (expected_lo << 8));
     }
 }

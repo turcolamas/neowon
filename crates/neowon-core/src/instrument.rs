@@ -199,6 +199,8 @@ pub struct TriggerConfig {
     pub sweep: Sweep,
     /// Trigger holdoff in seconds.
     pub holdoff: f64,
+    /// Programmable hardware trigger hysteresis as percentage of full scale (0.5% ..= 15.0%, default 1.5%).
+    pub hysteresis_pct: f32,
 }
 
 impl Default for TriggerConfig {
@@ -211,6 +213,7 @@ impl Default for TriggerConfig {
             level: 0.0,
             sweep: Sweep::Auto,
             holdoff: 100e-9,
+            hysteresis_pct: 1.5,
         }
     }
 }

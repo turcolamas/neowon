@@ -169,6 +169,88 @@ impl Scenario {
                 freq: 600.0,
                 amp: 1.5,
             }),
+            // Escenarios Automotrices dedicados para modo Demo / Simulador en vivo:
+            // 1. CKP 60-2 Inductivo (CH1) + CMP Hall 0-5V (CH2) a 1200 RPM (20 Hz giro cigüeñal)
+            "auto-ckp-60-2" => Some(Scenario::PerChannel([
+                SignalSpec {
+                    components: vec![
+                        Component::CkpWheel {
+                            rpm: 1200.0,
+                            teeth: 60,
+                            missing: 2,
+                            amp: 3.5,
+                        },
+                        Component::Noise { rms: 0.03 },
+                    ],
+                },
+                SignalSpec {
+                    components: vec![
+                        Component::Square {
+                            freq: 10.0, // Árbol de levas gira a mitad de RPM (10 Hz a 1200 RPM)
+                            amp: 2.5,
+                            duty: 0.30,
+                            phase: 0.4,
+                        },
+                        Component::Dc { level: 2.5 },
+                        Component::Noise { rms: 0.015 },
+                    ],
+                },
+            ])),
+            // 2. Bus CAN Diferencial ISO 11898: CH1 = CAN_H (2.5V..3.5V), CH2 = CAN_L (2.5V..1.5V)
+            "auto-can-diff" => Some(Scenario::PerChannel([
+                SignalSpec {
+                    components: vec![
+                        Component::Uart {
+                            baud: 50_000.0,
+                            bytes: *b"\x55\xA3\x0C\x7E\0\0\0\0",
+                            len: 4,
+                            gap_bits: 28.0,
+                            amp: -0.5, // Mark (idle/recessive) = 2.5V, Space (dominant) = 3.5V
+                        },
+                        Component::Dc { level: 3.0 },
+                        Component::Noise { rms: 0.015 },
+                    ],
+                },
+                SignalSpec {
+                    components: vec![
+                        Component::Uart {
+                            baud: 50_000.0,
+                            bytes: *b"\x55\xA3\x0C\x7E\0\0\0\0",
+                            len: 4,
+                            gap_bits: 28.0,
+                            amp: 0.5, // Mark (idle/recessive) = 2.5V, Space (dominant) = 1.5V
+                        },
+                        Component::Dc { level: 2.0 },
+                        Component::Noise { rms: 0.015 },
+                    ],
+                },
+            ])),
+            // 3. Mando PWM Actuador (CH1 0-12V) vs Respuesta Sensor Posición (CH2 0.5-4.5V)
+            "auto-pwm-actuator" => Some(Scenario::PerChannel([
+                SignalSpec {
+                    components: vec![
+                        Component::Square {
+                            freq: 250.0,
+                            amp: 6.0,
+                            duty: 0.45,
+                            phase: 0.0,
+                        },
+                        Component::Dc { level: 6.0 },
+                        Component::Noise { rms: 0.04 },
+                    ],
+                },
+                SignalSpec {
+                    components: vec![
+                        Component::Sine {
+                            freq: 2.0,
+                            amp: 1.8,
+                            phase: 0.0,
+                        },
+                        Component::Dc { level: 2.5 },
+                        Component::Noise { rms: 0.02 },
+                    ],
+                },
+            ])),
             _ => None,
         }
     }

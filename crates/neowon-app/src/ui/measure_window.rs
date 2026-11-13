@@ -20,6 +20,45 @@ fn slot_color(slot: usize) -> egui::Color32 {
     }
 }
 
+/// Marco de ventana flotante con opacidad/transparencia ajustable para superponer sobre la gráfica.
+pub fn translucent_window_frame(ctx: &egui::Context, opacity: f32) -> egui::Frame {
+    let clamped = opacity.clamp(0.20, 1.0);
+    let alpha = (clamped * 255.0).round() as u8;
+    let mut frame = egui::Frame::window(&ctx.style_of(ctx.theme()));
+    let fill = frame.fill;
+    frame.fill = egui::Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), alpha);
+    let stroke_col = frame.stroke.color;
+    frame.stroke.color = egui::Color32::from_rgba_unmultiplied(
+        stroke_col.r(),
+        stroke_col.g(),
+        stroke_col.b(),
+        alpha.max(120),
+    );
+    if clamped < 0.98 {
+        frame.shadow.color = egui::Color32::TRANSPARENT;
+    }
+    frame
+}
+
+/// Control compacto compartido para ajustar la opacidad/transparencia de las ventanas de mediciones.
+pub fn opacity_slider(ui: &mut egui::Ui, opacity: &mut f32) {
+    let mut pct = (*opacity * 100.0).round();
+    ui.horizontal(|ui| {
+        ui.label("🌓 Opacidad:")
+            .on_hover_text("Ajusta la transparencia de la ventana flotante sobre la cuadrícula");
+        if ui
+            .add(
+                egui::Slider::new(&mut pct, 20.0..=100.0)
+                    .fixed_decimals(0)
+                    .suffix("%"),
+            )
+            .changed()
+        {
+            *opacity = (pct / 100.0).clamp(0.20, 1.0);
+        }
+    });
+}
+
 pub fn show(ctx: &egui::Context, meas: &mut MeasureState) {
     show_config_dialog(ctx, meas);
 
@@ -27,12 +66,21 @@ pub fn show(ctx: &egui::Context, meas: &mut MeasureState) {
         return;
     }
     let mut open = meas.window;
+    let opacity = meas.window_opacity.clamp(0.20, 1.0);
     egui::Window::new("Measurements")
         .open(&mut open)
         .default_width(560.0)
         .default_height(460.0)
+        .frame(translucent_window_frame(ctx, opacity))
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            let faint = ui.visuals().faint_bg_color;
+            ui.visuals_mut().faint_bg_color = egui::Color32::from_rgba_unmultiplied(
+                faint.r(),
+                faint.g(),
+                faint.b(),
+                ((faint.a() as f32) * opacity).round() as u8,
+            );
+            ui.horizontal_wrapped(|ui| {
                 for (slot, name) in SLOT_NAMES.iter().enumerate() {
                     let on = meas.latest[slot].is_some();
                     ui.add_enabled_ui(on, |ui| {
@@ -60,6 +108,8 @@ pub fn show(ctx: &egui::Context, meas: &mut MeasureState) {
                 if ui.button(egui::RichText::new("⚙ Configurar Parámetros...").strong()).clicked() {
                     meas.config_dialog_open = true;
                 }
+                ui.separator();
+                opacity_slider(ui, &mut meas.window_opacity);
             });
             ui.separator();
 

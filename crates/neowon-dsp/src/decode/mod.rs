@@ -20,6 +20,7 @@ pub mod digitize;
 pub mod i2c;
 pub mod lin;
 pub mod onewire;
+pub mod sent;
 pub mod spi;
 pub mod uart;
 

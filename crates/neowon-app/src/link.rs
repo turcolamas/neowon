@@ -61,9 +61,58 @@ impl Link {
     pub fn force_trigger(&self) {
         self.sup.force_trigger();
     }
+
+    /// Indica si la fuente de adquisición activa es el Simulador Demo (`SimBackend`).
+    pub fn is_sim_mode(&self) -> bool {
+        self.caps
+            .as_ref()
+            .is_some_and(|c| c.name() == "Simulated")
+            || self.status.starts_with("Simulated")
+            || self.status.contains("Simulador")
+    }
+
+    /// Conmuta en caliente entre el Osciloscopio USB Hardware (OWON VDS1022) y el
+    /// Generador/Simulador Demo en vivo sin reiniciar la aplicación (Cap. 1.7 Connect Device).
+    pub fn switch_device_source(&mut self, use_simulator: bool) {
+        self.sup.shutdown();
+        self.caps = None;
+        self.frames_seen = 0;
+        if use_simulator {
+            self.status = "Iniciando Simulador Demo Automotriz…".into();
+            self.sup = neowon_backend::spawn(|| {
+                Ok(Box::new(neowon_sim::SimBackend::new()) as Box<dyn neowon_backend::Backend>)
+            });
+            self.sup.apply(self.config.clone());
+            if self.stimulus.is_empty() {
+                self.stimulus = "auto-ckp-60-2".into();
+            }
+            let _ = self
+                .sup
+                .commands
+                .send(neowon_backend::Command::Stimulus(self.stimulus.clone()));
+        } else {
+            self.status = "Conectando USB OWON VDS1022…".into();
+            self.sup = neowon_backend::spawn(neowon_vds1022::backend::factory(None));
+            self.sup.apply(self.config.clone());
+        }
+    }
+
+    /// Cambia la señal patrón generada por el Simulador Demo en vivo.
+    pub fn set_sim_stimulus(&mut self, stim_name: &str) {
+        self.stimulus = stim_name.to_string();
+        let _ = self
+            .sup
+            .commands
+            .send(neowon_backend::Command::Stimulus(self.stimulus.clone()));
+    }
 }
 
-pub(crate) fn ingest(time: Res<Time>, mut link: ResMut<Link>, mut sdr: ResMut<sdr::SdrState>) {
+pub(crate) fn ingest(
+    time: Res<Time>,
+    mut link: ResMut<Link>,
+    mut sdr: ResMut<sdr::SdrState>,
+    mut auto: Option<ResMut<crate::ui::automotive_dock::AutomotiveUiState>>,
+) {
     link.arrived.clear();
     while let Ok(event) = link.sup.events.try_recv() {
         match event {
@@ -90,15 +139,89 @@ pub(crate) fn ingest(time: Res<Time>, mut link: ResMut<Link>, mut sdr: ResMut<sd
                 sdr::iqdump::write(&mut sdr, &f);
                 sdr.latest = Some(f);
             }
-            Event::Frame(f) => {
+            Event::Frame(mut f) => {
                 link.frames_seen += 1;
                 link.last_frame_at = time.elapsed_secs_f64();
+
+                // Evaluación del Calificador de Disparo Automotriz Avanzado (Fase 2 — Cap. 4)
+                let mut accept_for_display = true;
+                if let Some(a) = auto.as_deref_mut() {
+                    if a.trigger_qualifier.mode != picowon_auto::AdvancedTriggerMode::StandardHardware {
+                        let src = link.config.trigger.source.min(1);
+                        let to_volts = |cap: &neowon_core::ChannelCapture| -> Vec<f64> {
+                            cap.data
+                                .iter()
+                                .map(|&r| (r as f64) * cap.cal.scale_i + cap.cal.offset_i)
+                                .collect()
+                        };
+                        let primary_v = f
+                            .channels
+                            .iter()
+                            .find(|c| c.ch == src)
+                            .or_else(|| f.channels.first())
+                            .map(to_volts)
+                            .unwrap_or_default();
+                        let ch1_v = f.channels.iter().find(|c| c.ch == 0).map(to_volts);
+                        let ch2_v = f.channels.iter().find(|c| c.ch == 1).map(to_volts);
+
+                        let full_scale_v = link
+                            .config
+                            .channels
+                            .get(src)
+                            .map(|c| c.volts_div * 10.0 * c.probe)
+                            .unwrap_or(10.0);
+                        let hyst_v = (link.config.trigger.hysteresis_pct as f64 / 100.0) * full_scale_v;
+
+                        let q_res = picowon_auto::evaluate_trigger_qualifier(
+                            &a.trigger_qualifier,
+                            &primary_v,
+                            ch1_v.as_deref(),
+                            ch2_v.as_deref(),
+                            f.sample_rate,
+                            link.config.trigger.level,
+                            hyst_v,
+                        );
+
+                        if q_res.matched {
+                            a.trigger_qualifier_rt.matched_frames += 1;
+                            if a.trigger_qualifier.realign_to_trigger_pos {
+                                if let Some(ev_idx) = q_res.event_sample_idx {
+                                    let len = primary_v.len().max(1);
+                                    let target_idx = (link.config.position.clamp(0.05, 0.95)
+                                        * (len as f64))
+                                        .round() as usize;
+                                    let mut shifted = (*f).clone();
+                                    for cap in shifted.channels.iter_mut() {
+                                        cap.data = picowon_auto::shift_samples_to_trigger(
+                                            &cap.data,
+                                            ev_idx,
+                                            target_idx,
+                                        );
+                                    }
+                                    f = std::sync::Arc::new(shifted);
+                                }
+                            }
+                            a.trigger_qualifier_rt.last_result = q_res;
+                            if link.config.trigger.sweep == neowon_core::Sweep::Single {
+                                link.config.running = false;
+                                link.dirty = true;
+                            }
+                        } else {
+                            a.trigger_qualifier_rt.rejected_frames += 1;
+                            a.trigger_qualifier_rt.last_result = q_res;
+                            if a.trigger_qualifier.hold_until_qualified && link.latest.is_some() {
+                                accept_for_display = false;
+                            }
+                        }
+                    }
+                }
+
                 link.arrived.push(f.clone());
                 if link.frames_seen == 1 || link.frames_seen.is_multiple_of(500) {
                     tracing::info!(frames = link.frames_seen, "acquiring");
                 }
                 // Si la adquisición está detenida (revisando captura histórica o en pausa), no pisar link.latest
-                if link.config.running {
+                if link.config.running && accept_for_display {
                     link.latest = Some(f);
                 }
             }

@@ -108,7 +108,7 @@ impl Backend for Vds1022Backend {
             let t = &cfg.trigger;
             let src = t.source.min(1);
             self.dev
-                .set_trigger(src, &t.kind, t.level, t.sweep)
+                .set_trigger_with_hysteresis(src, &t.kind, t.level, t.sweep, t.hysteresis_pct)
                 .map_err(fatal)?;
             self.dev.set_holdoff(src, t.holdoff).map_err(fatal)?;
         }
@@ -341,6 +341,7 @@ fn part_trigger(c: &ScopeConfig) -> ScopeConfigPart {
         t.source as u64,
         t.level.to_bits(),
         t.holdoff.to_bits(),
+        t.hysteresis_pct.to_bits() as u64,
         match t.sweep {
             neowon_core::Sweep::Auto => 0,
             neowon_core::Sweep::Normal => 1,

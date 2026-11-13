@@ -6,23 +6,44 @@ use neowon_core::{Coupling, Slope, Sweep};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresetCategory {
-    Ignition,
-    Injection,
+    StartingCharging,
     Sensors,
     Actuators,
+    Ignition,
+    Injection,
+    PressureVacuum,
     Networks,
-    StartingCharging,
+    ElectricHybrid,
+    BrakesChassis,
+    AccessoriesParasitic,
 }
 
 impl PresetCategory {
+    pub const ALL: [Self; 10] = [
+        Self::StartingCharging,
+        Self::Sensors,
+        Self::Actuators,
+        Self::Ignition,
+        Self::Injection,
+        Self::PressureVacuum,
+        Self::Networks,
+        Self::ElectricHybrid,
+        Self::BrakesChassis,
+        Self::AccessoriesParasitic,
+    ];
+
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Ignition => "🔥 Encendido e Ignición",
-            Self::Injection => "⛽ Inyección y Combustible",
-            Self::Sensors => "📡 Sensores de Motor",
-            Self::Actuators => "⚙️ Actuadores y PWM",
-            Self::Networks => "🌐 Redes CAN / LIN",
-            Self::StartingCharging => "🔋 Arranque y Carga",
+            Self::StartingCharging => "🔋 1. Carga y Arranque",
+            Self::Sensors => "📡 2. Sensores de Motor",
+            Self::Actuators => "⚙️ 3. Actuadores y Válvulas",
+            Self::Ignition => "🔥 4. Encendido e Ignición",
+            Self::Injection => "⛽ 5. Inyección y Combustible",
+            Self::PressureVacuum => "💨 6. Presión y Vacío en Cilindro",
+            Self::Networks => "🌐 7. Redes y Comunicaciones (CAN/LIN/SENT)",
+            Self::ElectricHybrid => "⚡ 8. Baterías y EV/Híbridos",
+            Self::BrakesChassis => "🚗 9. Frenos, ABS y Chasis",
+            Self::AccessoriesParasitic => "🔌 10. Accesorios y Consumos Parásitos",
         }
     }
 }
@@ -126,11 +147,11 @@ pub fn get_all_presets() -> Vec<AutomotivePreset> {
         },
 
         // ====================================================================
-        // 2. INYECCIÓN Y COMBUSTIBLE
+        // 2. INYECCIÓN Y COMBUSTIBLE (Categoría Actuadores y Válvulas)
         // ====================================================================
         AutomotivePreset {
             id: "inj_petrol_voltage",
-            category: PresetCategory::Injection,
+            category: PresetCategory::Actuators,
             name: "Inyector de Nafta / Gasolina Multipunto (Tensión)",
             description: "Comprueba el tiempo de inyección (ancho de pulso), la caída a masa y el pico inductivo al desactivarse el solenoide del inyector.",
             connection_guide: "Canal 1: Punta con atenuador 10:1 o 20:1 al cable de control negativo del inyector. Masa a tierra firme de chasis.",
@@ -160,7 +181,7 @@ pub fn get_all_presets() -> Vec<AutomotivePreset> {
         },
         AutomotivePreset {
             id: "inj_voltage_current_dual",
-            category: PresetCategory::Injection,
+            category: PresetCategory::Actuators,
             name: "Inyector Gasolina: Tensión (CH1) + Corriente (CH2)",
             description: "Captura dual que permite observar el momento exacto en que la aguja del inyector se despega de su asiento magnéticamente (punto de inflexión de la corriente).",
             connection_guide: "CH1: Punta 10:1 al control del inyector. CH2: Pinza amperimétrica abrazando el cable de alimentación.",
@@ -411,6 +432,172 @@ pub fn get_all_presets() -> Vec<AutomotivePreset> {
                 source: 1,
                 slope: Slope::Rising,
                 level_volts: 0.05,
+                sweep: Sweep::Auto,
+            },
+        },
+
+        // ====================================================================
+        // 5. PRESIÓN Y VACÍO EN CILINDRO
+        // ====================================================================
+        AutomotivePreset {
+            id: "pressure_in_cylinder_cranking",
+            category: PresetCategory::PressureVacuum,
+            name: "Presión en Cilindro con Transductor (Compresión Dinámica + Regla 720°)",
+            description: "Analiza la compresión real de cámara, apertura/cierre de válvulas, cruce y contrapresión de escape mediante transductor de presión roscado en bujía.",
+            connection_guide: "CH1: Transductor de presión (WPS500X / Autel / Hantek) en cilindro 1 (1V/100psi o 1V/7bar). CH2: Pinza inductiva o secundario en cilindro 1 para sincronismo de fase 720°.",
+            expected_waveform: "Pico de compresión simétrico de 120-180 psi (8-12 bar). Torre de expansión simétrica, muesca de apertura de escape 40° antes de PMI, carrera de escape <1.5 psi, y pozo de vacío de admisión profundo.",
+            timebase_s_per_div: 20.0e-3, // 20 ms/div
+            ch1: ChannelPreset {
+                enabled: true,
+                volts_per_div: 1.0,
+                attenuation: 1.0,
+                coupling: Coupling::Dc,
+                label: "CH1 Transductor Presión (bar/psi)",
+            },
+            ch2: ChannelPreset {
+                enabled: true,
+                volts_per_div: 2.0,
+                attenuation: 1.0,
+                coupling: Coupling::Dc,
+                label: "CH2 Sync Chispa Cil 1",
+            },
+            trigger: TriggerPreset {
+                enabled: true,
+                source: 1,
+                slope: Slope::Rising,
+                level_volts: 2.5,
+                sweep: Sweep::Normal,
+            },
+        },
+        AutomotivePreset {
+            id: "vacuum_intake_manifold",
+            category: PresetCategory::PressureVacuum,
+            name: "Vacío en Múltiple de Admisión (Detección de Válvulas Pisadas / Sellado)",
+            description: "Conexión de transductor de vacío a toma de admisión para evaluar el sellado de válvulas de admisión y escape en cada cilindro.",
+            connection_guide: "Canal 1: Transductor de presión/vacío con adaptador a manguera de vacío directo de múltiple. Motor regulando en ralentí estable.",
+            expected_waveform: "Ondas pulsantes regulares de 4 a 6 picos idénticos por ciclo de 720°. Una caída repetitiva en un cilindro indica válvula que no asienta o guía con fuga.",
+            timebase_s_per_div: 50.0e-3,
+            ch1: ChannelPreset {
+                enabled: true,
+                volts_per_div: 0.5,
+                attenuation: 1.0,
+                coupling: Coupling::Ac,
+                label: "CH1 Pulsos Vacío Admisión",
+            },
+            ch2: ChannelPreset {
+                enabled: false,
+                volts_per_div: 1.0,
+                attenuation: 1.0,
+                coupling: Coupling::Dc,
+                label: "CH2",
+            },
+            trigger: TriggerPreset {
+                enabled: true,
+                source: 1,
+                slope: Slope::Rising,
+                level_volts: 0.1,
+                sweep: Sweep::Auto,
+            },
+        },
+
+        // ====================================================================
+        // 7. BATERÍAS Y EV/HÍBRIDOS
+        // ====================================================================
+        AutomotivePreset {
+            id: "ev_resolver_motor",
+            category: PresetCategory::ElectricHybrid,
+            name: "Señales Resolver Motor de Tracción EV/Híbrido (Seno / Coseno)",
+            description: "Comprueba las señales ortogonales de 90° del sensor resolver acoplado al rotor del motor-generador eléctrico trifásico.",
+            connection_guide: "CH1: Señal Sin(+) respecto a Sin(-). CH2: Señal Cos(+) respecto a Cos(-). Precaución: desconectar previamente la alta tensión según protocolo de seguridad.",
+            expected_waveform: "Dos ondas senoidales moduladas de alta frecuencia desfasadas exactamente 90° eléctricos entre sí mientras gira el rotor.",
+            timebase_s_per_div: 5.0e-3,
+            ch1: ChannelPreset {
+                enabled: true,
+                volts_per_div: 1.0,
+                attenuation: 1.0,
+                coupling: Coupling::Ac,
+                label: "CH1 Resolver Seno",
+            },
+            ch2: ChannelPreset {
+                enabled: true,
+                volts_per_div: 1.0,
+                attenuation: 1.0,
+                coupling: Coupling::Ac,
+                label: "CH2 Resolver Coseno",
+            },
+            trigger: TriggerPreset {
+                enabled: true,
+                source: 1,
+                slope: Slope::Rising,
+                level_volts: 0.5,
+                sweep: Sweep::Auto,
+            },
+        },
+
+        // ====================================================================
+        // 8. FRENOS, ABS Y CHASIS
+        // ====================================================================
+        AutomotivePreset {
+            id: "brakes_abs_wheel_speed",
+            category: PresetCategory::BrakesChassis,
+            name: "Sensor de Velocidad de Rueda ABS (Activo Magnetorresistivo / Pasivo)",
+            description: "Verifica la amplitud, frecuencia e integridad de los pulsos generados por el sensor de rueda al girar la rueda a mano.",
+            connection_guide: "Canal 1: Punta al terminal de señal del sensor ABS de rueda. Masa a chasis o retorno del sensor.",
+            expected_waveform: "Para inductivo: señal senoidal simétrica de amplitud creciente con la velocidad. Para sensor activo Hall/MR: onda cuadrada limpia de 0.75V a 1.4V con frecuencia proporcional al giro.",
+            timebase_s_per_div: 20.0e-3,
+            ch1: ChannelPreset {
+                enabled: true,
+                volts_per_div: 0.5,
+                attenuation: 1.0,
+                coupling: Coupling::Dc,
+                label: "CH1 Sensor Rueda ABS",
+            },
+            ch2: ChannelPreset {
+                enabled: false,
+                volts_per_div: 1.0,
+                attenuation: 1.0,
+                coupling: Coupling::Dc,
+                label: "CH2",
+            },
+            trigger: TriggerPreset {
+                enabled: true,
+                source: 1,
+                slope: Slope::Rising,
+                level_volts: 0.4,
+                sweep: Sweep::Auto,
+            },
+        },
+
+        // ====================================================================
+        // 9. ACCESORIOS Y CONSUMOS PARÁSITOS
+        // ====================================================================
+        AutomotivePreset {
+            id: "parasitic_drain_current",
+            category: PresetCategory::AccessoriesParasitic,
+            name: "Consumo Parásito y Fuga en Reposo (Corriente de Descarga Batería)",
+            description: "Monitoreo prolongado del consumo en reposo tras el apagado de las unidades de control (sleep mode) para localizar módulos con fuga.",
+            connection_guide: "Canal 1: Pinza amperimétrica de baja corriente (60A / 100mV por Amperio) abrazando el cable negativo principal de batería.",
+            expected_waveform: "Consumo inicial de 1A a 3A durante el apagado de ECUs. Al cabo de 10 a 20 minutos, la corriente debe caer a menos de 35 a 50 mA en reposo absoluto.",
+            timebase_s_per_div: 2.0, // 2 s/div (registro lento)
+            ch1: ChannelPreset {
+                enabled: true,
+                volts_per_div: 0.05, // 50 mV/div = 500 mA/div
+                attenuation: 1.0,
+                coupling: Coupling::Dc,
+                label: "CH1 Pinza Amperios Batería",
+            },
+            ch2: ChannelPreset {
+                enabled: false,
+                volts_per_div: 1.0,
+                attenuation: 1.0,
+                coupling: Coupling::Dc,
+                label: "CH2",
+            },
+            trigger: TriggerPreset {
+                enabled: false,
+                source: 1,
+                slope: Slope::Rising,
+                level_volts: 0.1,
                 sweep: Sweep::Auto,
             },
         },

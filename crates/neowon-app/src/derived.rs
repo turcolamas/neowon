@@ -57,6 +57,36 @@ pub fn evaluate_pf(mask: &PfMask, samples: &[f32]) -> bool {
     (0..n).all(|i| samples[i] >= mask.lo[i] && samples[i] <= mask.hi[i])
 }
 
+/// Índices de muestras fuera de la envolvente `[lo, hi]` para resaltar puntos de falla.
+pub fn find_pf_violations(mask: &PfMask, samples: &[f32]) -> Vec<usize> {
+    let n = mask.lo.len().min(samples.len());
+    let mut out = Vec::new();
+    for i in 0..n {
+        if samples[i] < mask.lo[i] || samples[i] > mask.hi[i] {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Alerta sonora audible no bloqueante (compatible con binarios GUI Windows sin consola).
+pub fn play_alert_beep() {
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn MessageBeep(u_type: u32) -> i32;
+        }
+        // MB_ICONEXCLAMATION = 0x30
+        unsafe {
+            let _ = MessageBeep(0x0000_0030);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        print!("\x07");
+    }
+}
+
 #[derive(Resource)]
 pub struct PfState {
     pub enabled: bool,
@@ -66,10 +96,91 @@ pub struct PfState {
     /// Voltage tolerance, in vertical divisions.
     pub v_div: f64,
     pub mask: Option<PfMask>,
+    /// Forma de onda base usada para reconstruir la tolerancia en vivo al variar `h_div`/`v_div`.
+    pub reference: Option<Vec<f32>>,
     pub pass: u64,
     pub fail: u64,
     pub stop_on_fail: bool,
     pub output_multi: bool,
+    /// Fase 3 (Cap. 7.3 Actions): Alerta sonora al fallar máscara o por evento.
+    pub beep_on_fail: bool,
+    /// Fase 3 (Cap. 7.3 Actions): Auto-guardar captura (.nwc) en disco al fallar máscara o por evento.
+    pub autosave_on_fail: bool,
+    /// Fase 5: Ejecutar Acciones automáticas en cada disparo/trama nueva (incluso sin máscara activa).
+    pub action_on_trigger: bool,
+    /// Índices de muestras fuera de tolerancia en la última trama evaluada.
+    pub last_violations: Vec<usize>,
+    /// Longitud de la última traza evaluada contra la máscara.
+    pub last_mask_samples: usize,
+    /// Números de secuencia (`frame.seq`) que violaron la máscara (usado por el Navegador Visual de Búfer Cap. 6.1).
+    pub failed_frame_seqs: std::collections::HashSet<u64>,
+    /// Contador de capturas auto-guardadas en la sesión actual (límite de seguridad: 50 archivos).
+    pub autosave_count: u64,
+    /// Mensaje del último archivo auto-guardado por evento.
+    pub last_autosave_msg: Option<String>,
+}
+
+impl PfState {
+    pub fn reset_counters(&mut self) {
+        self.pass = 0;
+        self.fail = 0;
+        self.last_violations.clear();
+        self.last_mask_samples = 0;
+        self.failed_frame_seqs.clear();
+        self.autosave_count = 0;
+        self.last_autosave_msg = None;
+    }
+
+    pub fn rebuild_mask_from_reference(&mut self) -> bool {
+        let Some(ref raw) = self.reference else {
+            return false;
+        };
+        self.mask = Some(build_pf_mask(raw, self.h_div, self.v_div));
+        self.last_violations.clear();
+        true
+    }
+
+    pub fn mask_to_csv(&self) -> Option<String> {
+        let mask = self.mask.as_ref()?;
+        let mut out = String::from("# NeoWon/PicoScope Tolerance Mask CSV\nindex,lo_counts,hi_counts\n");
+        for (i, (lo, hi)) in mask.lo.iter().zip(mask.hi.iter()).enumerate() {
+            out.push_str(&format!("{i},{lo:.3},{hi:.3}\n"));
+        }
+        Some(out)
+    }
+
+    pub fn load_mask_csv(&mut self, csv: &str) -> Result<usize, String> {
+        let mut lo = Vec::new();
+        let mut hi = Vec::new();
+        for line in csv.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("index") {
+                continue;
+            }
+            let parts: Vec<&str> = trimmed.split(',').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let l: f32 = parts[1]
+                .trim()
+                .parse()
+                .map_err(|_| format!("Valor lo inválido: {}", parts[1]))?;
+            let h: f32 = parts[2]
+                .trim()
+                .parse()
+                .map_err(|_| format!("Valor hi inválido: {}", parts[2]))?;
+            lo.push(l.clamp(-128.0, 127.0));
+            hi.push(h.max(l).clamp(-128.0, 127.0));
+        }
+        if lo.is_empty() {
+            return Err("CSV de máscara vacío o sin filas válidas".to_string());
+        }
+        let n = lo.len();
+        self.mask = Some(PfMask { lo, hi });
+        self.reference = None;
+        self.reset_counters();
+        Ok(n)
+    }
 }
 
 impl Default for PfState {
@@ -80,10 +191,19 @@ impl Default for PfState {
             h_div: 1.0,
             v_div: 0.5,
             mask: None,
+            reference: None,
             pass: 0,
             fail: 0,
             stop_on_fail: false,
             output_multi: false,
+            beep_on_fail: false,
+            autosave_on_fail: false,
+            action_on_trigger: false,
+            last_violations: Vec::new(),
+            last_mask_samples: 0,
+            failed_frame_seqs: std::collections::HashSet::new(),
+            autosave_count: 0,
+            last_autosave_msg: None,
         }
     }
 }
@@ -144,6 +264,8 @@ pub struct MeasureState {
     pub bichannel_bands: [Band; N_BICHANNEL],
     pub show_bichannel: [bool; N_BICHANNEL],
     pub config_dialog_open: bool,
+    /// Opacidad de las ventanas flotantes de mediciones (`0.20..=1.0`).
+    pub window_opacity: f32,
 }
 
 impl Default for MeasureState {
@@ -176,6 +298,7 @@ impl Default for MeasureState {
             bichannel_bands: [Band::default(); N_BICHANNEL],
             show_bichannel: [false; N_BICHANNEL],
             config_dialog_open: false,
+            window_opacity: 0.85,
         }
     }
 }
@@ -309,7 +432,7 @@ pub fn compute_derived(
     mut fft: ResMut<FftState>,
     mut pf: ResMut<PfState>,
 ) {
-    let Some(frame) = &link.latest else { return };
+    let Some(frame) = link.latest.clone() else { return };
     if frame.seq == meas.last_seq {
         return;
     }
@@ -402,26 +525,71 @@ pub fn compute_derived(
         None
     };
 
-    let pf_result = if pf.enabled {
+    let mut pf_trigger_eligible = true;
+    let pf_eval = if pf.enabled {
         slot_caps[pf.source_slot.min(SLOTS - 1)]
             .zip(pf.mask.as_ref())
-            .map(|(cap, mask)| evaluate_pf(mask, &cap.data))
+            .map(|(cap, mask)| {
+                let len = mask.lo.len().min(cap.data.len());
+                let passed = evaluate_pf(mask, &cap.data);
+                let violations = if passed {
+                    Vec::new()
+                } else {
+                    find_pf_violations(mask, &cap.data)
+                };
+                (passed, violations, len)
+            })
     } else {
         None
     };
-    if let Some(passed) = pf_result {
+    if let Some((passed, violations, len)) = pf_eval {
+        pf_trigger_eligible = passed;
+        pf.last_mask_samples = len;
+        pf.last_violations = violations;
         if passed {
             pf.pass += 1;
         } else {
             pf.fail += 1;
+            pf.failed_frame_seqs.insert(frame.seq);
+            execute_pf_actions(&mut pf, &mut link, &frame, "mask_fail");
         }
         if pf.output_multi {
             let _ = link.sup.commands.send(Command::PassFail(passed));
         }
-        if pf.stop_on_fail && !passed {
-            link.config.running = false;
-            link.dirty = true;
+    } else if !pf.enabled {
+        pf.last_violations.clear();
+    }
+
+    // Acciones Automáticas por Trigger / Trama nueva (independiente de Máscara cuando está activo)
+    if pf.action_on_trigger && pf_trigger_eligible {
+        execute_pf_actions(&mut pf, &mut link, &frame, "trigger_action");
+    }
+}
+
+fn execute_pf_actions(
+    pf: &mut PfState,
+    link: &mut Link,
+    frame: &neowon_core::SharedFrame,
+    file_prefix: &str,
+) {
+    if pf.beep_on_fail {
+        play_alert_beep();
+    }
+    if pf.autosave_on_fail && pf.autosave_count < 50 {
+        let dir = crate::record::export_dir().join("Osciloscopio");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("{file_prefix}_seq_{:05}.nwc", frame.seq));
+        if neowon_core::nwc::write(&path, std::slice::from_ref(frame)).is_ok() {
+            pf.autosave_count += 1;
+            pf.last_autosave_msg = Some(format!(
+                "Auto-guardado #{}: {file_prefix}_seq_{:05}.nwc",
+                pf.autosave_count, frame.seq
+            ));
         }
+    }
+    if pf.stop_on_fail {
+        link.config.running = false;
+        link.dirty = true;
     }
 }
 
@@ -675,5 +843,22 @@ mod tests {
         assert!(evaluate_pf(&m, &[0.0, 10.0, -10.0]));
         assert!(evaluate_pf(&m, &[20.0, 10.0, -10.0])); // within +25 pad
         assert!(!evaluate_pf(&m, &[0.0, 10.0, 50.0])); // outside envelope
+    }
+
+    #[test]
+    fn pf_find_violations_and_csv_roundtrip() {
+        let m = build_pf_mask(&[0.0, 10.0, -10.0], 0.0, 1.0);
+        let viols = find_pf_violations(&m, &[0.0, 50.0, -10.0]);
+        assert_eq!(viols, vec![1]);
+
+        let mut st = PfState::default();
+        st.reference = Some(vec![0.0, 10.0, -10.0]);
+        assert!(st.rebuild_mask_from_reference());
+        let csv = st.mask_to_csv().expect("CSV generado");
+
+        let mut loaded = PfState::default();
+        let count = loaded.load_mask_csv(&csv).expect("CSV parseado");
+        assert_eq!(count, 3);
+        assert_eq!(loaded.mask.as_ref().unwrap().lo.len(), 3);
     }
 }

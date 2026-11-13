@@ -107,6 +107,13 @@ pub enum Component {
         deviation: f64,
         amp: f64,
     },
+    /// Rueda fónica automotriz CKP (ej. 60-2 o 36-1) para simulación de sincronismo y disparo por intervalo.
+    CkpWheel {
+        rpm: f64,
+        teeth: u8,
+        missing: u8,
+        amp: f64,
+    },
 }
 
 impl Component {
@@ -228,6 +235,23 @@ impl Component {
                 let arg = TAU * carrier * t + (deviation / mod_freq) * (TAU * mod_freq * t).sin();
                 amp * arg.sin()
             }
+            Component::CkpWheel {
+                rpm,
+                teeth,
+                missing,
+                amp,
+            } => {
+                let rev_freq = (rpm / 60.0).max(0.1);
+                let rev_phase = ((t * rev_freq).fract() + 1.0).fract();
+                let total_teeth = (*teeth).max(4) as f64;
+                let tooth_pos = rev_phase * total_teeth;
+                let tooth_idx = tooth_pos.floor() as u8;
+                if tooth_idx >= teeth.saturating_sub(*missing) {
+                    0.0
+                } else {
+                    amp * (TAU * tooth_pos).sin()
+                }
+            }
         }
     }
 
@@ -241,6 +265,7 @@ impl Component {
             | Component::Trapezoid { freq, .. } => Some(*freq),
             Component::Uart { baud, .. } => Some(*baud),
             Component::Am { carrier, .. } | Component::Fm { carrier, .. } => Some(*carrier),
+            Component::CkpWheel { rpm, teeth, .. } => Some((rpm / 60.0) * (*teeth as f64)),
             Component::Dc { .. } | Component::Noise { .. } | Component::Chirp { .. } => None,
         }
     }
